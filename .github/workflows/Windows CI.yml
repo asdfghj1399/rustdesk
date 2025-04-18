@@ -1,55 +1,30 @@
-name: "1️⃣ Windows Build (Manual Trigger Fixed)"
+name: "1️⃣ Windows Build (Debug)"
 
 on:
-  # 手动触发配置（必须顶格写，不能有缩进）
   workflow_dispatch:
     inputs:
-      build_type:
-        description: "Build Type"
+      build_mode:
+        description: "Build Mode"
         required: true
         default: "release"
         type: choice
-        options:
-          - "release"
-          - "debug"
-  
-  # 自动触发配置
-  push:
-    branches: [ master ]
+        options: ["release", "debug"]
 
 jobs:
   build:
-    name: "🛠️ Build - ${{ github.event.inputs.build_type || 'release' }}"
     runs-on: windows-latest
-
     steps:
-    - name: "1️⃣ Check Input Parameters"
+    - name: Create Artifact
       shell: pwsh
       run: |
-        echo "Build Type: ${{ github.event.inputs.build_type || 'release' }}"
-        echo "Event Name: ${{ github.event_name }}"
-        
-    - name: "2️⃣ Checkout Code"
-      uses: actions/checkout@v4
+        # 创建模拟构建产物
+        $mode = "${{ inputs.build_mode || 'release' }}"
+        mkdir -p "target/$mode"
+        echo "Built at $(Get-Date)" > "target/$mode/output.exe"
+        echo "ARTIFACT_PATH=target/$mode/output.exe" >> $env:GITHUB_ENV
 
-    - name: "3️⃣ Build Verification"
-      shell: pwsh
-      run: |
-        $buildType = "${{ github.event.inputs.build_type || 'release' }}"
-        echo "Simulating $buildType build..."
-        mkdir -p target\x86_64-pc-windows-msvc\$buildType
-        echo "dummy" > target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe
-        echo "EXE_PATH=target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe" >> $env:GITHUB_ENV
-
-    - name: "4️⃣ Show Artifacts"
-      shell: pwsh
-      run: |
-        dir target\x86_64-pc-windows-msvc\* -Recurse
-
-    - name: "5️⃣ Upload Artifact"
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: "rustdesk-${{ github.event.inputs.build_type || 'release' }}"
-        path: |
-          ${{ env.EXE_PATH }}
-        retention-days: 1
+        name: build-output
+        path: ${{ env.ARTIFACT_PATH }}
