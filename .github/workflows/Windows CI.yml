@@ -1,4 +1,4 @@
-name: "1️⃣ RustDesk Windows Build (Stable)"
+name: "1️⃣ RustDesk Windows Build (Final)"
 
 on:
   workflow_dispatch:
@@ -9,15 +9,10 @@ on:
         default: "release"
         type: choice
         options: ["release", "debug"]
-      full_clean:
-        description: "Full clean install"
-        type: boolean
-        default: false
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   VCPKG_DISABLE_METRICS: "true"
-  VCPKG_FORCE_SYSTEM_BINARIES: "1"  # 强制使用系统工具链
 
 jobs:
   build:
@@ -30,49 +25,63 @@ jobs:
       with:
         submodules: recursive
 
-    - name: "2️⃣ Prepare vcpkg"
+    - name: "2️⃣ Setup vcpkg (Safe Mode)"
       shell: pwsh
       run: |
-        # 清理旧安装（如果选择full_clean）
-        if (${{ inputs.full_clean }} -and (Test-Path "$env:VCPKG_ROOT")) {
-          Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
+        # 安全清理逻辑
+        if (Test-Path "$env:VCPKG_ROOT") {
+          # 仅删除vcpkg.exe保留已下载的库
+          Remove-Item -Force "$env:VCPKG_ROOT\vcpkg.exe" -ErrorAction SilentlyContinue
+          Remove-Item -Force "$env:VCPKG_ROOT\vcpkg_installed" -ErrorAction SilentlyContinue
+        } else {
+          New-Item -ItemType Directory -Path "$env:VCPKG_ROOT" -Force
         }
 
-        # 安装vcpkg
-        if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          cd "$env:VCPKG_ROOT"
-          git checkout 2024.04.17  # 锁定稳定版本
-          .\bootstrap-vcpkg.bat -disableMetrics
+        # 安装/更新vcpkg
+        Set-Location "$env:VCPKG_ROOT"
+        if (-not (Test-Path ".git")) {
+          git clone https://github.com/microsoft/vcpkg .
         }
-
-        # 更新PATH
+        git pull
+        .\bootstrap-vcpkg.bat -disableMetrics
         echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
-        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
 
-    - name: "3️⃣ Install dependencies (Stable)"
+    - name: "3️⃣ Install Dependencies (Robust)"
       shell: pwsh
       run: |
-        # 设置二进制缓存
-        $env:VCPKG_BINARY_SOURCES = "clear;default,readwrite"
-
-        # 分步安装依赖
-        $packages = @("libvpx", "libyuv", "openssl", "hwcodec")
-        foreach ($pkg in $packages) {
-          & "$env:VCPKG_ROOT\vcpkg" install $pkg `
-            --triplet x64-windows `
-            --clean-after-build `
-            --recurse `
-            --x-asset-sources=clear `
-            --overlay-triplets="$env:VCPKG_ROOT\triplets"
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Failed to install $pkg"
-            exit 1
+        Set-Location "$env:VCPKG_ROOT"
+        $retryCount = 0
+        $maxRetry = 2
+        
+        :install_loop while ($retryCount -lt $maxRetry) {
+          try {
+            .\vcpkg install @(
+              "libvpx[core]",
+              "libyuv[core]",
+              "openssl[core]",
+              "hwcodec[core]"
+            ) --triplet x64-windows `
+              --clean-after-build `
+              --recurse
+            
+            if ($LASTEXITCODE -eq 0) {
+              break install_loop
+            }
+          } catch {
+            Write-Output "Attempt $($retryCount + 1) failed: $_"
+          }
+          $retryCount++
+          if ($retryCount -lt $maxRetry) {
+            Start-Sleep -Seconds 30
           }
         }
+        
+        if ($retryCount -eq $maxRetry) {
+          Write-Output "::error::All installation attempts failed"
+          exit 1
+        }
 
-    - name: "4️⃣ Build RustDesk"
+    - name: "4️⃣ Build Project"
       shell: pwsh
       run: |
         $buildType = "${{ inputs.build_type }}"
@@ -80,16 +89,16 @@ jobs:
         
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Output "::error::Build failed - EXE not found"
+          Write-Output "::error::Build failed - Missing EXE"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
-    - name: "5️⃣ Upload artifact"
+    - name: "5️⃣ Upload Artifact"
       uses: actions/upload-artifact@v4
       with:
-        name: "rustdesk-${{ inputs.build_type }}-${{ github.run_number }}"
+        name: "rustdesk-${{ inputs.build_type }}-${{ github.run_id }}"
         path: |
           ${{ env.EXE_PATH }}
           target\x86_64-pc-windows-msvc\${{ inputs.build_type }}/*.dll
