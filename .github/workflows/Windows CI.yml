@@ -1,89 +1,88 @@
-name: "1️⃣ Windows Build with Artifacts (Manual Trigger)"
-
-env:
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-  VCPKG_COMMIT_ID: "b2cb0da531c2f1f740045bfe7c4dac59f0b2b69c"
+name: "1️⃣ Windows EXE Builder (Manual+Auto)"
 
 on:
-  # 手动触发配置（带参数）
+  # 手动触发（带参数）
   workflow_dispatch:
     inputs:
-      build_mode:
-        description: '选择构建模式'
+      build_type:
+        description: "Build Type (Debug/Release)"
         required: true
-        default: 'release'
+        default: "release"
         type: choice
-        options:
-          - 'release'
-          - 'debug'
-      upload_artifact:
-        description: '是否上传构建产物'
-        required: true
-        type: boolean
-        default: true
-
-  # 自动触发配置
+        options: 
+          - "release"
+          - "debug"
+  
+  # 自动触发
   push:
     branches: [ master ]
 
 jobs:
   build:
-    name: "Build Windows EXE [${{ github.event_name == 'workflow_dispatch' && 'Manual' || 'Auto' }}]"
-    runs-on: windows-2022
+    name: "🛠️ Build (${{ github.event.inputs.build_type || 'release' }})"
+    runs-on: windows-latest  # 使用最新Windows镜像避免版本问题
 
     steps:
-    - name: "1️⃣ Checkout code"
+    # 第一步：准备环境
+    - name: "1️⃣ Checkout Code"
       uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
-    - name: "2️⃣ Setup vcpkg"
-      shell: pwsh
-      run: |
-        $vcpkgDir = "C:\vcpkg"
-        if (-not (Test-Path "$vcpkgDir\.git")) {
-          git clone https://github.com/microsoft/vcpkg $vcpkgDir
-        }
-        cd $vcpkgDir
-        git checkout $env:VCPKG_COMMIT_ID
-        .\bootstrap-vcpkg.bat
-        echo "VCPKG_ROOT=$vcpkgDir" >> $env:GITHUB_ENV
-        echo "::group::vcpkg环境信息"
-        & "$vcpkgDir\vcpkg" version
-        echo "::endgroup::"
-
-    - name: "3️⃣ Install dependencies"
-      shell: pwsh
-      run: |
-        & "$env:VCPKG_ROOT\vcpkg" install --triplet x64-windows libvpx libyuv openssl
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-
-    - name: "4️⃣ Install Rust"
-      uses: dtolnay/rust-toolchain@v1
+    # 第二步：安装Rust（修复工具链问题）
+    - name: "2️⃣ Install Rust"
+      uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-        targets: x86_64-pc-windows-msvc
+        target: x86_64-pc-windows-msvc
+        profile: minimal
+        override: true
 
-    - name: "5️⃣ Build (${{ github.event.inputs.build_mode || 'release' }})"
-      shell: pwsh
+    # 第三步：安装vcpkg（修复路径问题）
+    - name: "3️⃣ Setup vcpkg"
+      shell: powershell
       run: |
-        $buildMode = "${{ github.event.inputs.build_mode || 'release' }}"
-        cargo build --$buildMode --target x86_64-pc-windows-msvc
+        $vcpkgRoot = "C:\vcpkg"
+        if (-not (Test-Path "$vcpkgRoot\.git")) {
+          git clone https://github.com/microsoft/vcpkg $vcpkgRoot
+        }
+        cd $vcpkgRoot
+        git pull
+        .\bootstrap-vcpkg.bat
+        echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+        echo "::add-path::$vcpkgRoot"
+
+    # 第四步：安装依赖（修复依赖问题）
+    - name: "4️⃣ Install Dependencies"
+      shell: powershell
+      run: |
+        vcpkg install --triplet x64-windows @(
+          "libvpx",
+          "libyuv",
+          "openssl"
+        ) --clean-after-build
+
+    # 第五步：构建项目（修复构建问题）
+    - name: "5️⃣ Build Project"
+      shell: powershell
+      run: |
+        $buildType = "${{ github.event.inputs.build_type || 'release' }}"
+        cargo build --$buildType --target x86_64-pc-windows-msvc -v
         
-        $exePath = "target\x86_64-pc-windows-msvc\$buildMode\rustdesk.exe"
+        # 验证EXE文件是否存在
+        $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Error "❌ 未找到EXE文件: $exePath"
+          Write-Output "::error::EXE file not found at $exePath"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
+    # 第六步：打包并上传（修复upload-artifact问题）
     - name: "6️⃣ Upload Artifact"
-      if: ${{ github.event.inputs.upload_artifact != false }}
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # 使用最新v4版本
       with:
-        name: "RustDesk-${{ github.event.inputs.build_mode || 'release' }}"
+        name: "rustdesk-${{ github.event.inputs.build_type || 'release' }}"
         path: |
           ${{ env.EXE_PATH }}
-          target\x86_64-pc-windows-msvc\${{ github.event.inputs.build_mode || 'release' }}/*.dll
+          target\x86_64-pc-windows-msvc\${{ github.event.inputs.build_type || 'release' }}/*.dll
         retention-days: 7
+        if-no-files-found: error
