@@ -1,30 +1,82 @@
-name: "1️⃣ Windows Build (Debug)"
+name: "1️⃣ RustDesk Windows Build (Manual)"
 
 on:
   workflow_dispatch:
     inputs:
-      build_mode:
-        description: "Build Mode"
+      build_type:
+        description: "Build Configuration"
         required: true
         default: "release"
         type: choice
         options: ["release", "debug"]
 
+env:
+  VCPKG_ROOT: "C:/vcpkg"
+
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30  # 设置超时时间
+
     steps:
-    - name: Create Artifact
+    # 步骤1：检出代码
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    # 步骤2：初始化环境
+    - name: Setup Build Tools
       shell: pwsh
       run: |
-        # 创建模拟构建产物
-        $mode = "${{ inputs.build_mode || 'release' }}"
-        mkdir -p "target/$mode"
-        echo "Built at $(Get-Date)" > "target/$mode/output.exe"
-        echo "ARTIFACT_PATH=target/$mode/output.exe" >> $env:GITHUB_ENV
+        # 安装 Chocolatey（Windows 包管理器）
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # 安装必要工具
+        choco install -y llvm ninja cmake
 
+    # 步骤3：安装 vcpkg
+    - name: Install vcpkg
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+        }
+        cd "$env:VCPKG_ROOT"
+        git pull
+        .\bootstrap-vcpkg.bat -disableMetrics
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+
+    # 步骤4：安装依赖
+    - name: Install Dependencies
+      shell: pwsh
+      run: |
+        & "$env:VCPKG_ROOT/vcpkg" install --triplet x64-windows `
+          libvpx libyuv openssl hwcodec
+
+    # 步骤5：构建 RustDesk
+    - name: Build RustDesk
+      shell: pwsh
+      run: |
+        $buildType = "${{ inputs.build_type }}"
+        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+        
+        # 验证输出文件
+        $exePath = "target/x86_64-pc-windows-msvc/$buildType/rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+          Write-Error "EXE not found at $exePath"
+          exit 1
+        }
+        echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
+
+    # 步骤6：打包并上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: build-output
-        path: ${{ env.ARTIFACT_PATH }}
+        name: rustdesk-${{ inputs.build_type }}
+        path: |
+          ${{ env.EXE_PATH }}
+          target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
+        retention-days: 7
