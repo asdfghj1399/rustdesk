@@ -1,4 +1,4 @@
-name: "1️⃣ RustDesk Windows Build (Fixed)"
+name: "1️⃣ RustDesk Windows Build (Stable)"
 
 on:
   workflow_dispatch:
@@ -9,14 +9,15 @@ on:
         default: "release"
         type: choice
         options: ["release", "debug"]
-      clean_build:
-        description: "Clean before build"
+      full_clean:
+        description: "Full clean install"
         type: boolean
         default: false
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   VCPKG_DISABLE_METRICS: "true"
+  VCPKG_FORCE_SYSTEM_BINARIES: "1"  # 强制使用系统工具链
 
 jobs:
   build:
@@ -29,66 +30,68 @@ jobs:
       with:
         submodules: recursive
 
-    - name: "2️⃣ Setup vcpkg"
+    - name: "2️⃣ Prepare vcpkg"
       shell: pwsh
       run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+        # 清理旧安装（如果选择full_clean）
+        if (${{ inputs.full_clean }} -and (Test-Path "$env:VCPKG_ROOT")) {
+          Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
+        }
+
+        # 安装vcpkg
+        if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
           cd "$env:VCPKG_ROOT"
+          git checkout 2024.04.17  # 锁定稳定版本
           .\bootstrap-vcpkg.bat -disableMetrics
         }
-        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
-        echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
 
-    - name: "3️⃣ Install dependencies (Fixed)"
+        # 更新PATH
+        echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+
+    - name: "3️⃣ Install dependencies (Stable)"
       shell: pwsh
       run: |
-        # 使用显式参数传递
-        $installArgs = @(
-          "install",
-          "libvpx",
-          "libyuv",
-          "openssl",
-          "hwcodec",
-          "--triplet", "x64-windows",
-          "--clean-after-build",
-          "--recurse"
-        )
-        & "$env:VCPKG_ROOT\vcpkg" @installArgs
+        # 设置二进制缓存
+        $env:VCPKG_BINARY_SOURCES = "clear;default,readwrite"
 
-        # 验证安装结果
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "vcpkg install failed with exit code $LASTEXITCODE"
-          exit 1
+        # 分步安装依赖
+        $packages = @("libvpx", "libyuv", "openssl", "hwcodec")
+        foreach ($pkg in $packages) {
+          & "$env:VCPKG_ROOT\vcpkg" install $pkg `
+            --triplet x64-windows `
+            --clean-after-build `
+            --recurse `
+            --x-asset-sources=clear `
+            --overlay-triplets="$env:VCPKG_ROOT\triplets"
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Failed to install $pkg"
+            exit 1
+          }
         }
 
-    - name: "4️⃣ Clean build (optional)"
-      if: ${{ inputs.clean_build }}
+    - name: "4️⃣ Build RustDesk"
       shell: pwsh
       run: |
-        cargo clean
-        Remove-Item -Recurse -Force target -ErrorAction SilentlyContinue
-
-    - name: "5️⃣ Build RustDesk"
-      shell: pwsh
-      run: |
-        $buildType = "${{ inputs.build_type || 'release' }}"
+        $buildType = "${{ inputs.build_type }}"
         cargo build --$buildType --target x86_64-pc-windows-msvc -v
         
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Output "::error::EXE not found at $exePath"
+          Write-Output "::error::Build failed - EXE not found"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
-    - name: "6️⃣ Upload artifact"
+    - name: "5️⃣ Upload artifact"
       uses: actions/upload-artifact@v4
       with:
-        name: "rustdesk-${{ inputs.build_type || 'release' }}"
+        name: "rustdesk-${{ inputs.build_type }}-${{ github.run_number }}"
         path: |
           ${{ env.EXE_PATH }}
-          target\x86_64-pc-windows-msvc\${{ inputs.build_type || 'release' }}/*.dll
+          target\x86_64-pc-windows-msvc\${{ inputs.build_type }}/*.dll
         retention-days: 7
         if-no-files-found: error
