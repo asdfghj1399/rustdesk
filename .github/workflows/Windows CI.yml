@@ -1,27 +1,21 @@
-name: "1️⃣ RustDesk Windows Build (Manual+Auto)"
+name: "1️⃣ RustDesk Windows Build (Fixed)"
 
 on:
-  # 手动触发配置（带参数）
   workflow_dispatch:
     inputs:
       build_type:
-        description: "选择构建类型"
+        description: "Build Type"
         required: true
         default: "release"
         type: choice
         options: ["release", "debug"]
-      clean_cache:
-        description: "是否清理缓存"
-        required: false
+      clean_build:
+        description: "Clean before build"
         type: boolean
         default: false
-  
-  # 自动触发配置
-  push:
-    branches: [master]
 
 env:
-  VCPKG_ROOT: "C:/vcpkg"
+  VCPKG_ROOT: "C:\\vcpkg"
   VCPKG_DISABLE_METRICS: "true"
 
 jobs:
@@ -30,88 +24,71 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    # 步骤1：检出代码
-    - name: "1️⃣ 检出代码"
+    - name: "1️⃣ Checkout code"
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    # 步骤2：初始化vcpkg（修复参数问题）
-    - name: "2️⃣ 安装vcpkg"
+    - name: "2️⃣ Setup vcpkg"
       shell: pwsh
       run: |
-        # 修复路径中的斜杠方向
-        $vcpkgDir = $env:VCPKG_ROOT.Replace('/', '\\')
-        
-        if (-not (Test-Path "$vcpkgDir\.git")) {
-          git clone https://github.com/microsoft/vcpkg "$vcpkgDir"
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          .\bootstrap-vcpkg.bat -disableMetrics
         }
-        cd "$vcpkgDir"
-        git pull
-        .\bootstrap-vcpkg.bat -disableMetrics
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+        echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
 
-        # 将vcpkg添加到PATH（兼容PowerShell语法）
-        $env:PATH = "$vcpkgDir;$env:PATH"
-        echo "VCPKG_ROOT=$vcpkgDir" >> $env:GITHUB_ENV
-
-    # 步骤3：安装依赖（修复参数解析问题）
-    - name: "3️⃣ 安装依赖"
+    - name: "3️⃣ Install dependencies (Fixed)"
       shell: pwsh
       run: |
-        # 使用显式参数数组避免解析问题
-        $vcpkgArgs = @(
+        # 使用显式参数传递
+        $installArgs = @(
           "install",
           "libvpx",
           "libyuv",
           "openssl",
           "hwcodec",
           "--triplet", "x64-windows",
-          "--clean-after-build"
+          "--clean-after-build",
+          "--recurse"
         )
-        & "$env:VCPKG_ROOT\vcpkg" @vcpkgArgs
+        & "$env:VCPKG_ROOT\vcpkg" @installArgs
 
-    # 步骤4：清理缓存（可选）
-    - name: "4️⃣ 清理缓存"
-      if: ${{ inputs.clean_cache }}
+        # 验证安装结果
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "vcpkg install failed with exit code $LASTEXITCODE"
+          exit 1
+        }
+
+    - name: "4️⃣ Clean build (optional)"
+      if: ${{ inputs.clean_build }}
       shell: pwsh
       run: |
         cargo clean
         Remove-Item -Recurse -Force target -ErrorAction SilentlyContinue
 
-    # 步骤5：构建项目
-    - name: "5️⃣ 构建RustDesk"
+    - name: "5️⃣ Build RustDesk"
       shell: pwsh
       run: |
         $buildType = "${{ inputs.build_type || 'release' }}"
         cargo build --$buildType --target x86_64-pc-windows-msvc -v
         
-        # 严格验证输出文件
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Output "::error::构建失败：未生成EXE文件"
+          Write-Output "::error::EXE not found at $exePath"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
-        echo "EXE_SIZE=$((Get-Item $exePath).Length/1MB) MB" >> $env:GITHUB_ENV
 
-    # 步骤6：上传产物
-    - name: "6️⃣ 上传构建结果"
+    - name: "6️⃣ Upload artifact"
       uses: actions/upload-artifact@v4
       with:
-        name: "rustdesk-${{ inputs.build_type || 'release' }}-${{ github.run_number }}"
+        name: "rustdesk-${{ inputs.build_type || 'release' }}"
         path: |
           ${{ env.EXE_PATH }}
-          target\x86_64-pc-windows-msvc\${{ inputs.build_type || 'release' }}\*.dll
+          target\x86_64-pc-windows-msvc\${{ inputs.build_type || 'release' }}/*.dll
         retention-days: 7
         if-no-files-found: error
-
-    # 步骤7：显示构建报告
-    - name: "7️⃣ 构建报告"
-      shell: pwsh
-      run: |
-        Write-Output "=== 构建结果 ==="
-        Write-Output "构建类型: ${{ inputs.build_type || 'release' }}"
-        Write-Output "EXE路径: ${{ env.EXE_PATH }}"
-        Write-Output "文件大小: ${{ env.EXE_SIZE }} MB"
-        Write-Output "下载名称: rustdesk-${{ inputs.build_type || 'release' }}-${{ github.run_number }}"
