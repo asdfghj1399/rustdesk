@@ -1,4 +1,4 @@
-name: Windows Build
+name: 1Windows Build
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
