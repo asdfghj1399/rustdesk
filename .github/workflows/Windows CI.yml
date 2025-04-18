@@ -1,4 +1,4 @@
-name: "1️⃣ RustDesk Windows Build (Manual)"
+name: "1️⃣ RustDesk Windows Build (Fixed)"
 
 on:
   workflow_dispatch:
@@ -9,54 +9,58 @@ on:
         default: "release"
         type: choice
         options: ["release", "debug"]
+      clean_build:
+        description: "Clean before build"
+        required: false
+        type: boolean
+        default: false
 
 env:
   VCPKG_ROOT: "C:/vcpkg"
+  VCPKG_DISABLE_METRICS: "true"
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30  # 设置超时时间
+    timeout-minutes: 45
 
     steps:
     # 步骤1：检出代码
-    - name: Checkout
+    - name: Checkout code
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    # 步骤2：初始化环境
-    - name: Setup Build Tools
+    # 步骤2：初始化vcpkg（强制经典模式）
+    - name: Setup vcpkg
       shell: pwsh
       run: |
-        # 安装 Chocolatey（Windows 包管理器）
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-        
-        # 安装必要工具
-        choco install -y llvm ninja cmake
-
-    # 步骤3：安装 vcpkg
-    - name: Install vcpkg
-      shell: pwsh
-      run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT")) {
+        if (-not (Test-Path "$env:VCPKG_ROOT/.git")) {
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
         }
         cd "$env:VCPKG_ROOT"
         git pull
         .\bootstrap-vcpkg.bat -disableMetrics
-        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
 
-    # 步骤4：安装依赖
-    - name: Install Dependencies
+    # 步骤3：安装依赖（使用经典模式）
+    - name: Install dependencies
       shell: pwsh
       run: |
-        & "$env:VCPKG_ROOT/vcpkg" install --triplet x64-windows `
+        & "$env:VCPKG_ROOT/vcpkg" install \
+          --triplet x64-windows \
+          --clean-after-build \
+          --classic \  # 强制使用经典模式
           libvpx libyuv openssl hwcodec
 
-    # 步骤5：构建 RustDesk
+    # 步骤4：清理构建（可选）
+    - name: Clean build
+      if: ${{ inputs.clean_build }}
+      shell: pwsh
+      run: |
+        cargo clean
+        Remove-Item -Recurse -Force target -ErrorAction SilentlyContinue
+
+    # 步骤5：构建项目
     - name: Build RustDesk
       shell: pwsh
       run: |
@@ -66,17 +70,30 @@ jobs:
         # 验证输出文件
         $exePath = "target/x86_64-pc-windows-msvc/$buildType/rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Error "EXE not found at $exePath"
+          Write-Output "::error::EXE not found at $exePath"
+          Get-ChildItem -Recurse target/
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
+        echo "EXE_SIZE=$((Get-Item $exePath).Length/1MB) MB" >> $env:GITHUB_ENV
 
-    # 步骤6：打包并上传
-    - name: Upload Artifact
+    # 步骤6：上传产物
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: rustdesk-${{ inputs.build_type }}
+        name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
         path: |
           ${{ env.EXE_PATH }}
           target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
         retention-days: 7
+        if-no-files-found: error
+
+    # 步骤7：显示构建信息
+    - name: Show build info
+      shell: pwsh
+      run: |
+        Write-Output "=== Build Summary ==="
+        Write-Output "Build Type: ${{ inputs.build_type }}"
+        Write-Output "EXE Path: ${{ env.EXE_PATH }}"
+        Write-Output "EXE Size: ${{ env.EXE_SIZE }}"
+        Write-Output "Artifact Name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}"
