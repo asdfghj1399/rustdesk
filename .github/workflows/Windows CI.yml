@@ -1,4 +1,4 @@
-name: 1Windows Build
+name: Windows Build with Artifacts
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -6,22 +6,12 @@ env:
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
   push:
-    branches:
-      - master
-    paths-ignore:
-      - ".github/**"
-      - "docs/**"
-      - "README.md"
-      - "res/**"
+    branches: [ master ]
 
 jobs:
-  build-windows:
-    name: Build Windows
+  build:
+    name: Build Windows EXE
     runs-on: windows-2022
 
     steps:
@@ -30,32 +20,25 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
-      id: setup_vcpkg
-      with:
-        vcpkgDirectory: 'C:\vcpkg'
-        vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+    - name: Setup vcpkg (self-contained)
+      shell: pwsh
+      run: |
+        # 独立安装vcpkg（不使用缓存）
+        $vcpkgDir = "C:\vcpkg"
+        if (-not (Test-Path $vcpkgDir)) {
+            git clone https://github.com/microsoft/vcpkg $vcpkgDir
+        }
+        cd $vcpkgDir
+        git checkout $env:VCPKG_COMMIT_ID
+        .\bootstrap-vcpkg.bat
+        $env:VCPKG_ROOT = $vcpkgDir
+        echo "VCPKG_ROOT=$vcpkgDir" >> $env:GITHUB_ENV
 
     - name: Install dependencies
       shell: pwsh
       run: |
-        # 确保使用绝对路径
-        $vcpkgRoot = "${{ steps.setup_vcpkg.outputs.vcpkgRoot }}"
-        if (-not (Test-Path "$vcpkgRoot\vcpkg.exe")) {
-            Write-Error "vcpkg.exe not found at $vcpkgRoot"
-            exit 1
-        }
-        
-        # 添加vcpkg到PATH
-        $env:PATH = "$vcpkgRoot;$env:PATH"
-        
-        # 安装依赖
-        vcpkg install --triplet x64-windows libvpx libyuv openssl
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "vcpkg install failed"
-            exit 1
-        }
+        & "$env:VCPKG_ROOT\vcpkg" install --triplet x64-windows libvpx libyuv openssl
+        if ($LASTEXITCODE -ne 0) { exit 1 }
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@v1
@@ -63,13 +46,20 @@ jobs:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
 
-    - name: Build
+    - name: Build Release
       shell: pwsh
       run: |
         cargo build --release --target x86_64-pc-windows-msvc
+        if (-not (Test-Path "target\x86_64-pc-windows-msvc\release\rustdesk.exe")) {
+            Write-Error "EXE file not found!"
+            exit 1
+        }
 
-    - name: Show output
-      shell: pwsh
-      run: |
-        dir target\x86_64-pc-windows-msvc\release\
-        Write-Host "✅ Build completed successfully"
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: RustDesk-Windows
+        path: |
+          target\x86_64-pc-windows-msvc\release\rustdesk.exe
+          target\x86_64-pc-windows-msvc\release\*.dll
+        retention-days: 3
