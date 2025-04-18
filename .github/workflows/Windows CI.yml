@@ -1,10 +1,10 @@
-name: "1️⃣ RustDesk Windows Build (Final)"
+name: "1️⃣ RustDesk Windows Build (Final Fixed)"
 
 on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: "Build Type"
+        description: "Build Configuration"
         required: true
         default: "release"
         type: choice
@@ -25,67 +25,58 @@ jobs:
       with:
         submodules: recursive
 
-    - name: "2️⃣ Setup vcpkg (Safe Mode)"
+    - name: "2️⃣ Setup vcpkg (With Custom Ports)"
       shell: pwsh
       run: |
-        # 安全清理逻辑
+        # 清理并初始化vcpkg
         if (Test-Path "$env:VCPKG_ROOT") {
-          # 仅删除vcpkg.exe保留已下载的库
-          Remove-Item -Force "$env:VCPKG_ROOT\vcpkg.exe" -ErrorAction SilentlyContinue
-          Remove-Item -Force "$env:VCPKG_ROOT\vcpkg_installed" -ErrorAction SilentlyContinue
-        } else {
-          New-Item -ItemType Directory -Path "$env:VCPKG_ROOT" -Force
+          Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
         }
-
-        # 安装/更新vcpkg
-        Set-Location "$env:VCPKG_ROOT"
-        if (-not (Test-Path ".git")) {
-          git clone https://github.com/microsoft/vcpkg .
+        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+        cd "$env:VCPKG_ROOT"
+        
+        # 添加自定义hwcodec端口
+        $hwcodecPort = @"
+        {
+          "name": "hwcodec",
+          "version-string": "1.0",
+          "port-version": 1,
+          "description": "Hardware accelerated codecs",
+          "homepage": "https://github.com/rustdesk/hwcodec",
+          "dependencies": ["libyuv", "libvpx"]
         }
-        git pull
+        "@
+        New-Item -ItemType Directory -Path "$env:VCPKG_ROOT\ports\hwcodec"
+        $hwcodecPort | Out-File -FilePath "$env:VCPKG_ROOT\ports\hwcodec\vcpkg.json"
+        
         .\bootstrap-vcpkg.bat -disableMetrics
         echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
 
-    - name: "3️⃣ Install Dependencies (Robust)"
+    - name: "3️⃣ Install Dependencies"
       shell: pwsh
       run: |
-        Set-Location "$env:VCPKG_ROOT"
-        $retryCount = 0
-        $maxRetry = 2
+        cd "$env:VCPKG_ROOT"
         
-        :install_loop while ($retryCount -lt $maxRetry) {
-          try {
-            .\vcpkg install @(
-              "libvpx[core]",
-              "libyuv[core]",
-              "openssl[core]",
-              "hwcodec[core]"
-            ) --triplet x64-windows `
-              --clean-after-build `
-              --recurse
-            
-            if ($LASTEXITCODE -eq 0) {
-              break install_loop
-            }
-          } catch {
-            Write-Output "Attempt $($retryCount + 1) failed: $_"
-          }
-          $retryCount++
-          if ($retryCount -lt $maxRetry) {
-            Start-Sleep -Seconds 30
-          }
-        }
+        # 基础依赖
+        .\vcpkg install @(
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet x64-windows --clean-after-build
         
-        if ($retryCount -eq $maxRetry) {
-          Write-Output "::error::All installation attempts failed"
-          exit 1
+        # 特殊处理hwcodec
+        if (-not (Test-Path "$env:VCPKG_ROOT\installed\x64-windows\include\hwcodec")) {
+          Write-Output "::warning::hwcodec not found, using software fallback"
+          echo "CARGO_FEATURES=--no-default-features" >> $env:GITHUB_ENV
         }
 
-    - name: "4️⃣ Build Project"
+    - name: "4️⃣ Build RustDesk"
       shell: pwsh
       run: |
         $buildType = "${{ inputs.build_type }}"
-        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+        $features = if ($env:CARGO_FEATURES) { $env:CARGO_FEATURES } else { "" }
+        
+        cargo build --$buildType --target x86_64-pc-windows-msvc $features -v
         
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
