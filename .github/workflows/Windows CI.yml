@@ -5,7 +5,16 @@ env:
   VCPKG_COMMIT_ID: "b2cb0da531c2f1f740045bfe7c4dac59f0b2b69c"
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发配置
+    inputs:
+      build_type:
+        description: '选择构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - 'debug'
+          - 'release'
   pull_request:
     paths-ignore:
       - "docs/**"
@@ -35,6 +44,7 @@ jobs:
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
+      id: vcpkg
       with:
         vcpkgDirectory: 'C:\vcpkg'
         vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
@@ -42,7 +52,12 @@ jobs:
     - name: Install dependencies
       shell: pwsh
       run: |
-        & "$env:VCPKG_ROOT\vcpkg" install --triplet x64-windows libvpx libyuv openssl
+        $vcpkgPath = "${{ steps.vcpkg.outputs.vcpkgRoot }}\vcpkg"
+        & "$vcpkgPath" install --triplet x64-windows libvpx libyuv openssl
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "vcpkg 安装失败"
+            exit 1
+        }
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@v1
@@ -50,11 +65,19 @@ jobs:
         toolchain: stable
         targets: ${{ matrix.target }}
 
-    - name: Build (Release)
-      run: cargo build --release --target ${{ matrix.target }}
+    - name: Build
+      shell: pwsh
+      run: |
+        $buildType = "${{ github.event.inputs.build_type || 'release' }}"
+        cargo build --$buildType --target ${{ matrix.target }}
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "构建失败"
+            exit 1
+        }
 
     - name: Show output
       shell: pwsh
       run: |
-        dir target\${{ matrix.target }}\release\
-        Write-Host "Build completed successfully"
+        $buildType = "${{ github.event.inputs.build_type || 'release' }}"
+        dir "target\${{ matrix.target }}\$buildType\"
+        Write-Host "✅ 构建成功！生成文件位于 target\${{ matrix.target }}\$buildType\"
