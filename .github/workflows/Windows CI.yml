@@ -1,0 +1,54 @@
+name: 1Windows Build
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "b2cb0da531c2f1f740045bfe7c4dac59f0b2b69c"
+
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - ".github/**"
+      - "docs/**"
+      - "README.md"
+      - "res/**"
+
+jobs:
+  build-windows:
+    name: Build Windows (${{ matrix.target }})
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc]  # 仅保留MSVC工具链
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: 'C:\vcpkg'
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install dependencies
+        run: |
+          .\vcpkg\vcpkg install --triplet x64-windows libvpx libyuv openssl
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build (Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Show output
+        run: dir target\${{ matrix.target }}\release\
