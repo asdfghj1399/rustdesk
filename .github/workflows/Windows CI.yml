@@ -1,6 +1,10 @@
-name: "1️⃣ Windows EXE Builder (Manual+Auto)"
+name: "1️⃣ Windows EXE Builder (Fixed)"
 
-on:
+env:
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: true  # 允许旧版命令
+  VCPKG_DISABLE_METRICS: true           # 禁用vcpkg遥测
+
+on:on:
   # 手动触发（带参数）
   workflow_dispatch:
     inputs:
@@ -13,32 +17,38 @@ on:
           - "release"
           - "debug"
   
-  # 自动触发
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build Type"
+        required: true
+        default: "release"
+        type: choice
+        options: ["release", "debug"]
+  
   push:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   build:
     name: "🛠️ Build (${{ github.event.inputs.build_type || 'release' }})"
-    runs-on: windows-latest  # 使用最新Windows镜像避免版本问题
+    runs-on: windows-latest
 
     steps:
-    # 第一步：准备环境
+    # 第一步：检出代码
     - name: "1️⃣ Checkout Code"
       uses: actions/checkout@v4
 
-    # 第二步：安装Rust（修复工具链问题）
+    # 第二步：安装Rust
     - name: "2️⃣ Install Rust"
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: stable
-        target: x86_64-pc-windows-msvc
-        profile: minimal
-        override: true
+        targets: x86_64-pc-windows-msvc
 
-    # 第三步：安装vcpkg（修复路径问题）
-    - name: "3️⃣ Setup vcpkg"
-      shell: powershell
+    # 第三步：安装vcpkg（修复版）
+    - name: "3️⃣ Install vcpkg"
+      shell: pwsh
       run: |
         $vcpkgRoot = "C:\vcpkg"
         if (-not (Test-Path "$vcpkgRoot\.git")) {
@@ -46,39 +56,38 @@ jobs:
         }
         cd $vcpkgRoot
         git pull
-        .\bootstrap-vcpkg.bat
+        .\bootstrap-vcpkg.bat -disableMetrics
         echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
-        echo "::add-path::$vcpkgRoot"
+        echo "$vcpkgRoot" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-    # 第四步：安装依赖（修复依赖问题）
+    # 第四步：安装依赖
     - name: "4️⃣ Install Dependencies"
-      shell: powershell
+      shell: pwsh
       run: |
-        vcpkg install --triplet x64-windows @(
-          "libvpx",
-          "libyuv",
-          "openssl"
-        ) --clean-after-build
+        $ErrorActionPreference = "Stop"
+        & "$env:VCPKG_ROOT\vcpkg" install `
+          --triplet x64-windows `
+          --clean-after-build `
+          libvpx libyuv openssl
 
-    # 第五步：构建项目（修复构建问题）
+    # 第五步：构建项目
     - name: "5️⃣ Build Project"
-      shell: powershell
+      shell: pwsh
       run: |
         $buildType = "${{ github.event.inputs.build_type || 'release' }}"
-        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+        cargo build --$buildType --target x86_64-pc-windows-msvc
         
-        # 验证EXE文件是否存在
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Output "::error::EXE file not found at $exePath"
+          Write-Output "::error::EXE not found at $exePath"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
-    # 第六步：打包并上传（修复upload-artifact问题）
+    # 第六步：上传产物
     - name: "6️⃣ Upload Artifact"
-      uses: actions/upload-artifact@v4  # 使用最新v4版本
+      uses: actions/upload-artifact@v4
       with:
         name: "rustdesk-${{ github.event.inputs.build_type || 'release' }}"
         path: |
