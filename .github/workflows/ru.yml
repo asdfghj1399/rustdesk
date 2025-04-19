@@ -1,164 +1,126 @@
-name: Build RustDesk Windows Flutter
+name: Build RustDesk (Windows)
 
 on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: "Full clean rebuild"
+        description: "Perform clean rebuild"
         type: boolean
         default: false
+      enable_hwcodec:
+        description: "Enable hardware acceleration"
+        type: boolean
+        default: true
 
 env:
-  VCPKG_ROOT: "${{ github.workspace }}/vcpkg"
-  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 固定vcpkg版本
   VERSION: "1.3.9"
   FLUTTER_VERSION: "3.24.5"
-  RUST_VERSION: "1.75"
-  LLVM_VERSION: "15.0.6"
+  RUST_VERSION: "1.75.0"
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  BUILD_TYPE: "release"
+  TARGET_ARCH: "x86_64"
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-2022
     timeout-minutes: 120
-    
+
     steps:
-    # 1. 清理工作区（可选）
-    - name: "🧹 Clean Workspace"
+    - name: Clean workspace
       if: ${{ inputs.clean_build }}
       shell: powershell
       run: |
-        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/vcpkg" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\vcpkg" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\target" -ErrorAction SilentlyContinue
 
-    # 2. 检出代码
-    - name: "📥 Checkout Code"
+    - name: Checkout code
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        fetch-depth: 0
 
-    # 3. 安装构建工具链
-    - name: "🛠️ Install Build Tools"
+    - name: Install dependencies (fixed)
       shell: powershell
       run: |
-        # 安装LLVM
-        choco install llvm --version $env:LLVM_VERSION -y
-        # 安装必要的工具
-        choco install nasm cmake git -y
+        # 修复1：显式设置执行策略
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        
+        # 修复2：使用更可靠的安装方式
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # 修复3：显式导入模块
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+        
+        # 安装必要组件
+        choco install -y llvm --version=15.0.6
+        choco install -y nasm cmake git python --ignore-checksums
         refreshenv
+        
+        # 修复4：手动更新PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
-    # 4. 安装Rust
-    - name: "🦀 Install Rust"
+    - name: Setup Rust
       uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: ${{ env.RUST_VERSION }}
         targets: x86_64-pc-windows-msvc
-        components: "rustfmt"
+        components: rustfmt
 
-    # 5. 安装Flutter
-    - name: "📱 Install Flutter"
+    - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        channel: "stable"
+        channel: stable
         flutter-version: ${{ env.FLUTTER_VERSION }}
 
-    # 6. 替换Flutter引擎（解决兼容性问题）
-    - name: "🔧 Replace Flutter Engine"
+    - name: Patch Flutter engine
       shell: powershell
       run: |
         flutter doctor -v
         flutter precache --windows
-        Invoke-WebRequest -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" -OutFile "windows-x64-release.zip"
-        Expand-Archive -Path "windows-x64-release.zip" -DestinationPath "windows-x64-release"
-        Move-Item -Force "windows-x64-release/*" "C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/"
+        Invoke-WebRequest -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" -OutFile "engine.zip"
+        Expand-Archive -Path "engine.zip" -DestinationPath "engine"
+        Move-Item -Force "engine\*" "C:\hostedtoolcache\windows\flutter\stable-$env:FLUTTER_VERSION-x64\bin\cache\artifacts\engine\windows-x64-release\"
 
-    # 7. 源码编译vcpkg（避免预编译文件损坏）
-    - name: "📦 Install vcpkg"
+    - name: Setup vcpkg
       shell: powershell
       run: |
-        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-        cd "$env:VCPKG_ROOT"
-        git checkout ${{ env.VCPKG_COMMIT_ID }}
+        git clone https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
+        cd "$env:GITHUB_WORKSPACE\vcpkg"
+        git checkout $env:VCPKG_COMMIT_ID
         .\bootstrap-vcpkg.bat -disableMetrics
-        # 验证安装
-        .\vcpkg version
-        if (-not $?) { exit 1 }
+        .\vcpkg integrate install
 
-    # 8. 安装依赖（带重试机制）
-    - name: "🧩 Install Dependencies"
+    - name: Build RustDesk
       shell: powershell
-      env:
-        VCPKG_DEFAULT_HOST_TRIPLET: "x64-windows-static"
       run: |
-        $deps = @("libvpx[core]", "libyuv[core]", "openssl[core]")
-        $maxRetries = 3
-        $retryDelay = 30
+        $buildArgs = if ('${{ inputs.enable_hwcodec }}' -eq 'true') { "--hwcodec --flutter --vram" } else { "--flutter --vram" }
+        python .\build.py $buildArgs --portable --skip-portable-pack
         
-        foreach ($dep in $deps) {
-          $retry = 0
-          while ($retry -lt $maxRetries) {
-            try {
-              Write-Output "Installing $dep (Attempt $($retry+1))..."
-              & "$env:VCPKG_ROOT/vcpkg" install $dep `
-                --triplet x64-windows-static `
-                --clean-after-build `
-                --recurse
-              
-              if ($LASTEXITCODE -eq 0) { break }
-            } catch {
-              Write-Output "Failed to install $dep. Error: $_"
-            }
-            
-            $retry++
-            if ($retry -lt $maxRetries) {
-              Write-Output "Retrying in $retryDelay seconds..."
-              Start-Sleep -Seconds $retryDelay
-            }
-          }
-          
-          if ($retry -eq $maxRetries) {
-            Write-Output "Failed to install $dep after $maxRetries attempts."
-            # 输出日志以便调试
-            Get-ChildItem "$env:VCPKG_ROOT/buildtrees" -Recurse -Filter "*.log" | ForEach-Object {
-              Write-Output "=== $($_.FullName) ==="
-              Get-Content $_.FullName -Tail 50
-              Write-Output "======================="
-            }
-            exit 1
-          }
+        if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
+          throw "Build failed - rustdesk.exe not found!"
         }
 
-    # 9. 构建RustDesk
-    - name: "🔨 Build RustDesk"
+    - name: Package artifacts
       shell: powershell
       run: |
-        python .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
-        if (-not (Test-Path "flutter/build/windows/x64/runner/Release/rustdesk.exe")) {
-          Write-Output "Build failed - rustdesk.exe not found!"
-          exit 1
-        }
-
-    # 10. 打包可执行文件
-    - name: "📦 Package Executable"
-      shell: powershell
-      run: |
-        # 创建输出目录
-        New-Item -ItemType Directory -Path ".\output" -Force
+        New-Item -ItemType Directory -Path ".\dist" -Force
+        Copy-Item -Path "flutter\build\windows\x64\runner\Release\*" -Destination ".\dist" -Recurse
         
-        # 复制主程序
-        Copy-Item -Path "flutter/build/windows/x64/runner/Release/*" -Destination ".\output" -Recurse
+        # 下载USB驱动
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip" -OutFile "usbmmidd.zip"
+        Expand-Archive -Path "usbmmidd.zip" -DestinationPath ".\usbmmidd"
+        Move-Item -Path ".\usbmmidd\x64\*" -Destination ".\dist\usbmmidd_v2" -Force
         
-        # 下载并添加USB重定向驱动
-        Invoke-WebRequest -Uri "https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip" -OutFile "usbmmidd_v2.zip"
-        Expand-Archive "usbmmidd_v2.zip" -DestinationPath ".\usbmmidd_v2"
-        Remove-Item -Path ".\usbmmidd_v2\Win32" -Recurse -ErrorAction SilentlyContinue
-        Remove-Item -Path ".\usbmmidd_v2\deviceinstaller64.exe", ".\usbmmidd_v2\deviceinstaller.exe", ".\usbmmidd_v2\usbmmidd.bat" -ErrorAction SilentlyContinue
-        Move-Item -Path ".\usbmmidd_v2" -Destination ".\output\usbmmidd_v2" -Force
+        # 创建ZIP包
+        Compress-Archive -Path ".\dist\*" -DestinationPath ".\rustdesk-$env:VERSION-portable.zip" -Force
 
-    # 11. 上传制品
-    - name: "📤 Upload Artifact"
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-windows
         path: |
-          output/*
-        retention-days: 1
+          rustdesk-${{ env.VERSION }}-portable.zip
+          dist\rustdesk.exe
+        retention-days: 7
