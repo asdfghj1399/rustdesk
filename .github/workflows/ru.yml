@@ -1,88 +1,52 @@
-name: RustDesk CI
+name: CI Pipeline with Path Fixes
 
 on:
   workflow_dispatch:
     inputs:
-      build-type:
-        description: 'Build type'
-        required: true
-        default: 'release'
-        type: choice
-        options: [release, debug]
+      clean-build:
+        description: 'Perform deep clean'
+        type: boolean
+        default: false
 
 env:
-  RUST_VERSION: "1.75.0"
-  FLUTTER_VERSION: "3.24.5"
-  PYTHON_VERSION: "3.9.13"
-  LLVM_VERSION: "15.0.7"
-  NASM_VERSION: "2.16.01"
+  VCPKG_ROOT: C:\vcpkg  # 使用Windows原生路径格式
 
 jobs:
-  build:
+  setup:
     runs-on: windows-latest
-    timeout-minutes: 45
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Fix Permissions
-      shell: powershell
-      run: |
-        # 权限修复脚本（如上）
+      - name: Clean workspace (PowerShell)
+        if: ${{ inputs.clean-build }}
+        shell: powershell
+        run: |
+          # 安全删除目录（Windows原生方式）
+          if (Test-Path $env:VCPKG_ROOT) {
+              Remove-Item -Path $env:VCPKG_ROOT -Recurse -Force -ErrorAction Stop
+              Write-Output "成功清理vcpkg目录"
+          } else {
+              Write-Output "vcpkg目录不存在，跳过清理"
+          }
 
-    - name: Setup Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: ${{ env.RUST_VERSION }}
-        target: x86_64-pc-windows-msvc
-        components: rustfmt, clippy
+          # 附加清理其他缓存
+          Remove-Item -Path target -Recurse -ErrorAction SilentlyContinue
+          cargo clean
 
-    - name: Setup Flutter (Fixed)
-      uses: subosito/flutter-action@v2
-      with:
-        channel: stable
-        flutter-version: ${{ env.FLUTTER_VERSION }}
-        architecture: x64
-        cache-path: ${{ runner.temp }}/flutter_cache
-        pub-cache-path: ${{ runner.temp }}/pub_cache
+      - name: Bootstrap vcpkg
+        shell: cmd  # 使用CMD处理路径
+        run: |
+          if exist "%VCPKG_ROOT%" (
+              rmdir /s /q "%VCPKG_ROOT%"
+          )
+          git clone https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
+          cd "%VCPKG_ROOT%"
+          .\bootstrap-vcpkg.bat
 
-    - name: Install Dependencies
-      shell: powershell
-      run: |
-        choco install -y python --version=${{ env.PYTHON_VERSION }}
-        choco install -y llvm --version=${{ env.LLVM_VERSION }}
-        choco install -y nasm --version=${{ env.NASM_VERSION }}
-        refreshenv
-
-    - name: Build Project
-      shell: powershell
-      run: |
-        $ErrorActionPreference = "Stop"
-        
-        # 设置环境变量
-        $env:Path += ";C:\Program Files\LLVM\bin"
-        $env:VCPKG_ROOT = "C:\vcpkg"
-        
-        # 构建命令
-        cargo build --${{ inputs.build-type }} --target x86_64-pc-windows-msvc -vv
-        
-        # 验证输出
-        if (-not (Test-Path "target\${{ inputs.build-type }}\rustdesk.exe")) {
-          Write-Output "::error::Build failed!"
-          Get-ChildItem target\${{ inputs.build-type }}
-          exit 1
-        }
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-binaries
-        path: |
-          target/${{ inputs.build-type }}/rustdesk.exe
-          target/${{ inputs.build-type }}/*.dll
-        retention-days: 7
+  build:
+    needs: setup
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
