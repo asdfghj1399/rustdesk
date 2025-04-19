@@ -1,36 +1,81 @@
-name: Windows Build Workflow
+name: "🛠️ RustDesk Windows Build (Stable)"
 
 on:
-  workflow_dispatch:  # 添加手动触发
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Select build configuration"
+        required: true
+        default: "release"
+        type: choice
+        options: ["release", "debug"]
+      clean_cache:
+        description: "Perform full clean before build"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"
+  BUILD_DIR: "C:\\build_output"
 
 jobs:
-  build-windows:
-    name: Build on Windows
+  build:
     runs-on: windows-latest
-    
+    timeout-minutes: 60
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      
-    - name: Set up Rust
+    - name: "1️⃣ Checkout code"
+      uses: actions/checkout@v4  # 更新到v4版本
+      with:
+        submodules: recursive
+
+    - name: "2️⃣ Setup Rust"
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
         target: x86_64-pc-windows-msvc
         override: true
+
+    - name: "3️⃣ Initialize vcpkg"
+      shell: powershell
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        }
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+
+    - name: "4️⃣ Install Dependencies"
+      shell: powershell
+      run: |
+        & "$env:VCPKG_ROOT\vcpkg" install @(
+          "libvpx",
+          "libyuv",
+          "openssl"
+        ) --triplet x64-windows --clean-after-build
+
+    - name: "5️⃣ Build Project"
+      shell: powershell
+      run: |
+        $buildType = "${{ inputs.build_type }}"
+        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
         
-    - name: Build release
-      run: cargo build --release
-      
-    - name: Run tests
-      run: cargo test --release
-      
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+        if (${{ inputs.clean_cache }}) {
+          cargo clean
+        }
+        
+        cargo build --$buildType --target x86_64-pc-windows-msvc
+        
+        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe")) {
+          Write-Error "Build failed - EXE not found"
+          exit 1
+        }
+
+    - name: "6️⃣ Upload Artifacts"
+      uses: actions/upload-artifact@v4  # 更新到v4版本
       with:
-        name: windows-binaries
-        path: target/release/*.exe
+        name: rustdesk-${{ inputs.build_type }}
+        path: |
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
+        retention-days: 7
