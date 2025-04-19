@@ -9,6 +9,7 @@ on:
 
 env:
   RUST_VERSION: "1.75.0"
+  FLUTTER_VERSION: "3.24.5"  # 明确指定Flutter版本
   VERSION: "1.3.9"
   BUILD_DIR: "target/release"
   FLUTTER_BUILD_DIR: "flutter/build/windows/x64/runner/Release"
@@ -24,6 +25,12 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Setup Flutter (Fixed)
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+
     - name: Install Rust
       uses: actions-rs/toolchain@v1
       with:
@@ -33,19 +40,36 @@ jobs:
         override: true
         components: rustfmt
 
-    - name: Install dependencies
+    - name: Install system dependencies (Fixed)
       shell: powershell
       run: |
-        choco install -y cmake git python llvm --version=15.0.6 nasm
-        python -m pip install --upgrade pip
-        flutter doctor -v
+        # 修复Chocolatey安装
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        $chocoScript = Join-Path $env:TEMP 'choco-install.ps1'
+        Invoke-WebRequest -Uri 'https://community.chocolatey.org/install.ps1' -OutFile $chocoScript -UseBasicParsing
+        & $chocoScript
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
+        $env:PATH = "$env:PATH;C:\Program Files\CMake\bin;C:\ProgramData\chocolatey\bin"
+
+        # 安装必要工具
+        choco install -y cmake git python --version=3.9.13 llvm --version=15.0.6 nasm
+        refreshenv
+
+    - name: Verify environments
+      shell: powershell
+      run: |
+        flutter --version
+        rustc --version
+        cargo --version
+        cmake --version
 
     - name: Build Rust backend
       shell: powershell
       run: |
         cd rust
         cargo build --release --features hwcodec,vram,flutter
-        if (-not (Test-Path "$env:BUILD_DIR/rustdesk.exe")) {
+        if (-not (Test-Path "../$env:BUILD_DIR/rustdesk.exe")) {
             throw "Rust build failed - rustdesk.exe not found"
         }
 
@@ -62,7 +86,7 @@ jobs:
       shell: powershell
       run: |
         # 复制Rust构建的可执行文件到Flutter构建目录
-        Copy-Item "rust/$env:BUILD_DIR/rustdesk.exe" -Destination "$env:FLUTTER_BUILD_DIR" -Force
+        Copy-Item "$env:BUILD_DIR/rustdesk.exe" -Destination "$env:FLUTTER_BUILD_DIR" -Force
 
     - name: Package artifacts
       shell: powershell
