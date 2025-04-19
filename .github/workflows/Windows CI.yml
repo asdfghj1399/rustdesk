@@ -1,22 +1,19 @@
-name: "🛠️ RustDesk Windows Build (Stable)"
+name: "🛠️ RustDesk Windows CI (Stable)"
 
 on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: "Select build configuration"
+        description: "Build configuration"
         required: true
         default: "release"
         type: choice
         options: ["release", "debug"]
-      clean_cache:
-        description: "Perform full clean before build"
-        type: boolean
-        default: false
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
-  BUILD_DIR: "C:\\build_output"
+  VCPKG_BINARY_SOURCES: "clear;default,readwrite"  # 修复缓存配置
+  VCPKG_DISABLE_METRICS: "true"
 
 jobs:
   build:
@@ -24,58 +21,56 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: "1️⃣ Checkout code"
-      uses: actions/checkout@v4  # 更新到v4版本
+    - name: "1️⃣ Clean Workspace"
+      shell: powershell
+      run: |
+        # 清理旧构建残留
+        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
+
+    - name: "2️⃣ Checkout Code"
+      uses: actions/checkout@v4
       with:
         submodules: recursive
+        path: src
 
-    - name: "2️⃣ Setup Rust"
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        target: x86_64-pc-windows-msvc
-        override: true
-
-    - name: "3️⃣ Initialize vcpkg"
+    - name: "3️⃣ Setup vcpkg"
       shell: powershell
       run: |
         if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
         }
-        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+        echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
 
-    - name: "4️⃣ Install Dependencies"
+    - name: "4️⃣ Install Dependencies (Fixed)"
       shell: powershell
+      working-directory: src
       run: |
+        # 禁用问题配置
+        $env:VCPKG_FEATURE_FLAGS = "-versions"
+        
         & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx",
-          "libyuv",
-          "openssl"
-        ) --triplet x64-windows --clean-after-build
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet x64-windows `
+          --clean-after-build `
+          --recurse `
+          --x-asset-sources=clear
 
     - name: "5️⃣ Build Project"
       shell: powershell
+      working-directory: src
       run: |
-        $buildType = "${{ inputs.build_type }}"
-        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
-        
-        if (${{ inputs.clean_cache }}) {
-          cargo clean
-        }
-        
-        cargo build --$buildType --target x86_64-pc-windows-msvc
-        
-        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe")) {
-          Write-Error "Build failed - EXE not found"
-          exit 1
-        }
+        cargo build --${{ inputs.build_type }} `
+          --target x86_64-pc-windows-msvc `
+          --config "build.rustflags=['-C', 'target-feature=+crt-static']"
 
     - name: "6️⃣ Upload Artifacts"
-      uses: actions/upload-artifact@v4  # 更新到v4版本
+      uses: actions/upload-artifact@v4
       with:
         name: rustdesk-${{ inputs.build_type }}
         path: |
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
-        retention-days: 7
+          src/target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
+          src/target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
