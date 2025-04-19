@@ -39,25 +39,17 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
-    - name: Install dependencies (fixed)
+    - name: Install dependencies
       shell: powershell
       run: |
-        # 修复1：显式设置执行策略
         Set-ExecutionPolicy Bypass -Scope Process -Force
-        
-        # 修复2：使用更可靠的安装方式
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
         iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-        
-        # 修复3：显式导入模块
         Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
         
-        # 安装必要组件
         choco install -y llvm --version=15.0.6
         choco install -y nasm cmake git python --ignore-checksums
         refreshenv
-        
-        # 修复4：手动更新PATH
         $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
     - name: Setup Rust
@@ -78,6 +70,7 @@ jobs:
       run: |
         flutter doctor -v
         flutter precache --windows
+        $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" -OutFile "engine.zip"
         Expand-Archive -Path "engine.zip" -DestinationPath "engine"
         Move-Item -Force "engine\*" "C:\hostedtoolcache\windows\flutter\stable-$env:FLUTTER_VERSION-x64\bin\cache\artifacts\engine\windows-x64-release\"
@@ -91,14 +84,26 @@ jobs:
         .\bootstrap-vcpkg.bat -disableMetrics
         .\vcpkg integrate install
 
-    - name: Build RustDesk
+    - name: Build RustDesk (Fixed)
       shell: powershell
       run: |
-        $buildArgs = if ('${{ inputs.enable_hwcodec }}' -eq 'true') { "--hwcodec --flutter --vram" } else { "--flutter --vram" }
-        python .\build.py $buildArgs --portable --skip-portable-pack
+        # 修复参数传递方式
+        $argsList = @("--flutter", "--vram")
+        if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
+            $argsList += "--hwcodec"
+        }
         
+        # 添加便携版参数
+        $argsList += "--portable"
+        $argsList += "--skip-portable-pack"
+        
+        # 执行构建
+        Write-Output "Running build.py with arguments: $argsList"
+        python .\build.py $argsList
+        
+        # 验证构建结果
         if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
-          throw "Build failed - rustdesk.exe not found!"
+            throw "Build failed - rustdesk.exe not found!"
         }
 
     - name: Package artifacts
