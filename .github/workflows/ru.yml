@@ -20,7 +20,7 @@ env:
   BUILD_TYPE: "release"
   TARGET_ARCH: "x86_64"
   VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
-  VCPKG_FORCE_SYSTEM_BINARIES: "1"  # 关键修复：强制使用系统工具链
+  VCPKG_FORCE_SYSTEM_BINARIES: "1"
 
 jobs:
   build:
@@ -44,26 +44,19 @@ jobs:
     - name: Install system dependencies
       shell: powershell
       run: |
-        # 修复1：确保使用TLS 1.2
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        
-        # 修复2：更可靠的Chocolatey安装
         Set-ExecutionPolicy Bypass -Scope Process -Force
         $chocoInstallScript = Join-Path $env:TEMP 'choco-install.ps1'
         Invoke-WebRequest -Uri 'https://community.chocolatey.org/install.ps1' -OutFile $chocoInstallScript -UseBasicParsing
         & $chocoInstallScript
-        
-        # 修复3：显式等待环境更新
         Start-Sleep -Seconds 10
         Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
         
-        # 安装必要工具
         choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
         choco install -y git python --version=3.9.13
         choco install -y llvm --version=15.0.6
         choco install -y nasm
         
-        # 修复4：手动更新PATH
         $env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
         $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
         $env:PATH = "C:\Program Files\Git\cmd;$env:PATH"
@@ -95,19 +88,43 @@ jobs:
     - name: Setup vcpkg (Fixed)
       shell: powershell
       run: |
-        # 修复5：使用更可靠的vcpkg安装方式
-        git config --global core.longpaths true
-        git clone --depth 1 --branch $env:VCPKG_COMMIT_ID https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
-        cd "$env:GITHUB_WORKSPACE\vcpkg"
-        .\bootstrap-vcpkg.bat -disableMetrics
-        .\vcpkg integrate install
+        # 修复1：确保工作目录存在
+        if (-not (Test-Path "$env:GITHUB_WORKSPACE")) {
+            New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE" -Force
+        }
+        
+        # 修复2：更可靠的vcpkg克隆和初始化
+        $vcpkgDir = "$env:GITHUB_WORKSPACE\vcpkg"
+        if (-not (Test-Path $vcpkgDir)) {
+            git config --global core.longpaths true
+            git clone --depth 1 --branch $env:VCPKG_COMMIT_ID https://github.com/microsoft/vcpkg $vcpkgDir
+        }
+        
+        # 修复3：显式检查目录存在性
+        if (-not (Test-Path "$vcpkgDir\bootstrap-vcpkg.bat")) {
+            throw "vcpkg bootstrap file not found after clone"
+        }
+        
+        # 修复4：确保在正确目录执行命令
+        Push-Location $vcpkgDir
+        try {
+            .\bootstrap-vcpkg.bat -disableMetrics
+            .\vcpkg integrate install
+        } finally {
+            Pop-Location
+        }
 
     - name: Install vcpkg dependencies (Fixed)
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
+        $vcpkgDir = "$env:GITHUB_WORKSPACE\vcpkg"
         
-        # 修复6：分步安装依赖，添加重试逻辑
+        # 修复5：确保vcpkg可执行文件存在
+        if (-not (Test-Path "$vcpkgDir\vcpkg.exe")) {
+            throw "vcpkg.exe not found at $vcpkgDir"
+        }
+        
         function Install-VcpkgPackage {
             param($package)
             $attempt = 1
@@ -116,7 +133,7 @@ jobs:
             while ($attempt -le $maxAttempts) {
                 try {
                     Write-Output "Attempt $attempt : Installing $package"
-                    .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET $package
+                    & "$vcpkgDir\vcpkg" install --triplet=$env:VCPKG_DEFAULT_TRIPLET $package
                     return
                 } catch {
                     Write-Output "Attempt $attempt failed: $_"
@@ -154,7 +171,6 @@ jobs:
         
         Write-Output "Building with arguments: $argsList"
         
-        # 带重试的构建
         $attempt = 1
         $maxAttempts = 2
         $success = $false
