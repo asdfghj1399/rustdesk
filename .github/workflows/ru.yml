@@ -10,7 +10,7 @@ on:
       enable_hwcodec:
         description: "Enable hardware acceleration"
         type: boolean
-        default: false  # 默认禁用硬件加速
+        default: false
 
 env:
   VERSION: "1.3.9"
@@ -19,6 +19,7 @@ env:
   VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
   BUILD_TYPE: "release"
   TARGET_ARCH: "x86_64"
+  VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
 
 jobs:
   build:
@@ -39,7 +40,7 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
-    - name: Install dependencies
+    - name: Install system dependencies
       shell: powershell
       run: |
         Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -84,50 +85,48 @@ jobs:
         .\bootstrap-vcpkg.bat -disableMetrics
         .\vcpkg integrate install
 
-    - name: Install vcpkg dependencies
+    - name: Install vcpkg dependencies (Fixed)
       shell: powershell
       run: |
-        .\vcpkg\vcpkg install --triplet x64-windows-static `
-          libvpx libyuv openssl opus ffmpeg aom
-
-    - name: Build RustDesk (Fixed)
-      shell: powershell
-      run: |
-        # 根据输入决定是否启用硬件加速
-        $hwcodecArg = ""
-        if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
-            # 确保硬件加速依赖存在
-            if (-not (Test-Path "$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows-static\bin\avcodec-58.dll")) {
-                Write-Output "Warning: Hardware acceleration dependencies not found, disabling hwcodec"
-            } else {
-                $hwcodecArg = "--hwcodec"
-            }
-        }
+        $ErrorActionPreference = "Stop"
         
-        # 构建参数
+        # 基础依赖
+        .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
+          libvpx libyuv openssl opus
+        
+        # 视频编解码相关
+        .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
+          ffmpeg[core,avcodec,avformat,swresample,swscale] `
+          aom[core]
+        
+        # 硬件加速相关（可选）
+        if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
+            .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
+              nv-codec-headers
+        }
+
+    - name: Build RustDesk
+      shell: powershell
+      run: |
         $argsList = @("--flutter", "--vram", "--portable", "--skip-portable-pack")
-        if ($hwcodecArg -ne "") {
-            $argsList += $hwcodecArg
+        if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
+            $argsList += "--hwcodec"
         }
         
         Write-Output "Building with arguments: $argsList"
         
-        # 执行构建
+        # 首次尝试构建
         python .\build.py $argsList
         
-        # 验证构建结果
+        # 如果失败且启用了硬件加速，尝试禁用
+        if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe") -and ('${{ inputs.enable_hwcodec }}' -eq 'true')) {
+            Write-Output "Build with hwcodec failed, retrying without..."
+            python .\build.py --flutter --vram --portable --skip-portable-pack
+        }
+        
+        # 最终验证
         if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
-            # 尝试不带硬件加速的构建
-            if ($hwcodecArg -ne "") {
-                Write-Output "Retrying build without hwcodec..."
-                python .\build.py --flutter --vram --portable --skip-portable-pack
-                
-                if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
-                    throw "Build failed even without hwcodec"
-                }
-            } else {
-                throw "Build failed - rustdesk.exe not found!"
-            }
+            throw "Build failed - rustdesk.exe not found!"
         }
 
     - name: Package artifacts
@@ -136,13 +135,11 @@ jobs:
         New-Item -ItemType Directory -Path ".\dist" -Force
         Copy-Item -Path "flutter\build\windows\x64\runner\Release\*" -Destination ".\dist" -Recurse
         
-        # 下载USB驱动
         $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri "https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip" -OutFile "usbmmidd.zip"
         Expand-Archive -Path "usbmmidd.zip" -DestinationPath ".\usbmmidd"
         Move-Item -Path ".\usbmmidd\x64\*" -Destination ".\dist\usbmmidd_v2" -Force
         
-        # 创建ZIP包
         Compress-Archive -Path ".\dist\*" -DestinationPath ".\rustdesk-$env:VERSION-portable.zip" -Force
 
     - name: Upload artifact
