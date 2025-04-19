@@ -20,6 +20,7 @@ env:
   BUILD_TYPE: "release"
   TARGET_ARCH: "x86_64"
   VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
+  VCPKG_FORCE_SYSTEM_BINARIES: "1"  # 关键修复：强制使用系统工具链
 
 jobs:
   build:
@@ -43,15 +44,30 @@ jobs:
     - name: Install system dependencies
       shell: powershell
       run: |
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+        # 修复1：确保使用TLS 1.2
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
+        # 修复2：更可靠的Chocolatey安装
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        $chocoInstallScript = Join-Path $env:TEMP 'choco-install.ps1'
+        Invoke-WebRequest -Uri 'https://community.chocolatey.org/install.ps1' -OutFile $chocoInstallScript -UseBasicParsing
+        & $chocoInstallScript
+        
+        # 修复3：显式等待环境更新
+        Start-Sleep -Seconds 10
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
+        
+        # 安装必要工具
+        choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+        choco install -y git python --version=3.9.13
         choco install -y llvm --version=15.0.6
-        choco install -y nasm cmake git python --ignore-checksums
-        refreshenv
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        choco install -y nasm
+        
+        # 修复4：手动更新PATH
+        $env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
+        $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+        $env:PATH = "C:\Program Files\Git\cmd;$env:PATH"
+        $env:PATH = "C:\Python39;$env:PATH"
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@v1
@@ -76,12 +92,13 @@ jobs:
         Expand-Archive -Path "engine.zip" -DestinationPath "engine"
         Move-Item -Force "engine\*" "C:\hostedtoolcache\windows\flutter\stable-$env:FLUTTER_VERSION-x64\bin\cache\artifacts\engine\windows-x64-release\"
 
-    - name: Setup vcpkg
+    - name: Setup vcpkg (Fixed)
       shell: powershell
       run: |
-        git clone https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
+        # 修复5：使用更可靠的vcpkg安装方式
+        git config --global core.longpaths true
+        git clone --depth 1 --branch $env:VCPKG_COMMIT_ID https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
         cd "$env:GITHUB_WORKSPACE\vcpkg"
-        git checkout $env:VCPKG_COMMIT_ID
         .\bootstrap-vcpkg.bat -disableMetrics
         .\vcpkg integrate install
 
@@ -90,19 +107,41 @@ jobs:
       run: |
         $ErrorActionPreference = "Stop"
         
+        # 修复6：分步安装依赖，添加重试逻辑
+        function Install-VcpkgPackage {
+            param($package)
+            $attempt = 1
+            $maxAttempts = 3
+            
+            while ($attempt -le $maxAttempts) {
+                try {
+                    Write-Output "Attempt $attempt : Installing $package"
+                    .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET $package
+                    return
+                } catch {
+                    Write-Output "Attempt $attempt failed: $_"
+                    if ($attempt -eq $maxAttempts) {
+                        throw "Failed to install $package after $maxAttempts attempts"
+                    }
+                    Start-Sleep -Seconds (10 * $attempt)
+                    $attempt++
+                }
+            }
+        }
+        
         # 基础依赖
-        .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
-          libvpx libyuv openssl opus
+        Install-VcpkgPackage "libvpx"
+        Install-VcpkgPackage "libyuv"
+        Install-VcpkgPackage "openssl"
+        Install-VcpkgPackage "opus"
         
-        # 视频编解码相关
-        .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
-          ffmpeg[core,avcodec,avformat,swresample,swscale] `
-          aom[core]
+        # 视频编解码
+        Install-VcpkgPackage "ffmpeg[core,avcodec,avformat,swresample,swscale]"
+        Install-VcpkgPackage "aom[core]"
         
-        # 硬件加速相关（可选）
+        # 可选硬件加速
         if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
-            .\vcpkg\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET `
-              nv-codec-headers
+            Install-VcpkgPackage "nv-codec-headers"
         }
 
     - name: Build RustDesk
@@ -115,18 +154,27 @@ jobs:
         
         Write-Output "Building with arguments: $argsList"
         
-        # 首次尝试构建
-        python .\build.py $argsList
+        # 带重试的构建
+        $attempt = 1
+        $maxAttempts = 2
+        $success = $false
         
-        # 如果失败且启用了硬件加速，尝试禁用
-        if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe") -and ('${{ inputs.enable_hwcodec }}' -eq 'true')) {
-            Write-Output "Build with hwcodec failed, retrying without..."
-            python .\build.py --flutter --vram --portable --skip-portable-pack
-        }
-        
-        # 最终验证
-        if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
-            throw "Build failed - rustdesk.exe not found!"
+        while ($attempt -le $maxAttempts -and -not $success) {
+            try {
+                python .\build.py $argsList
+                if (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe") {
+                    $success = $true
+                } else {
+                    throw "rustdesk.exe not found"
+                }
+            } catch {
+                Write-Output "Attempt $attempt failed: $_"
+                if ($attempt -eq $maxAttempts) {
+                    throw "Build failed after $maxAttempts attempts"
+                }
+                Start-Sleep -Seconds (10 * $attempt)
+                $attempt++
+            }
         }
 
     - name: Package artifacts
