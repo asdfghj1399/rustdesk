@@ -1,27 +1,46 @@
-name: "🚀 RustDesk中文环境构建"
+name: "🚀 RustDesk手动触发构建（中文优化版）"
+
+on:
+  # 手动触发配置（已添加）
+  workflow_dispatch:
+    inputs:
+      构建模式:
+        description: "选择构建类型"
+        required: true 
+        default: "release"
+        type: choice
+        options: 
+          - "release"
+          - "debug"
+      清理缓存:
+        description: "是否彻底清理构建缓存"
+        type: boolean
+        default: false
 
 env:
-  # 强制使用简体中文编码
-  LC_ALL: "zh_CN.UTF-8"  
-  LANG: "zh_CN.UTF-8"
-  VCPKG_ROOT: "C:\\rustdesk_vcpkg"  # 避免空格和中文路径
+  # 中文环境专用配置
+  LC_ALL: "zh_CN.UTF-8"
+  VCPKG_ROOT: "C:\\rustdesk_build"
 
 jobs:
-  build:
+  构建任务:
     runs-on: windows-latest
     
     steps:
-    - name: "1. 设置纯净环境"
+    - name: "1. 环境初始化"
       shell: cmd
       run: |
         chcp 65001
-        set PATH=%PATH%;C:\Program Files\Git\usr\bin
-        rd /s/q target 2>nul
+        @echo 正在准备构建环境...
+        if %{{ inputs.清理缓存 }}% == true (
+          rd /s/q "%VCPKG_ROOT%" 2>nul
+          rd /s/q target 2>nul
+        )
 
-    - name: "2. 安装vcpkg"
+    - name: "2. 安装构建工具"
       shell: cmd
       run: |
-        if not exist "%VCPKG_ROOT%" (
+        if not exist "%VCPKG_ROOT%\\vcpkg.exe" (
           git clone https://github.com/microsoft/vcpkg "%VCPKG_ROOT%"
           cd "%VCPKG_ROOT%"
           bootstrap-vcpkg.bat -disableMetrics
@@ -36,23 +55,23 @@ jobs:
           libvpx libyuv openssl ^
           --clean-after-build
 
-    - name: "4. 构建项目（中文兼容模式）"
+    - name: "4. 编译项目"
       shell: cmd
       run: |
-        set CARGO_TARGET_DIR=%CD%\build_output
-        cargo build --release ^
+        set CARGO_TARGET_DIR=%CD%\\build_output
+        cargo build --%{{ inputs.构建模式 }}% ^
           --target x86_64-pc-windows-msvc ^
           --config "build.rustflags=['-C', 'target-feature=+crt-static']"
         
-        if not exist "%CARGO_TARGET_DIR%\\x86_64-pc-windows-msvc\\release\\rustdesk.exe" (
-          echo ::error::构建失败：未生成EXE文件
+        if not exist "%CARGO_TARGET_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.构建模式 }}%\\rustdesk.exe" (
+          echo ::error::编译失败：未生成可执行文件
           exit 1
         )
 
-    - name: "5. 打包成果物"
+    - name: "5. 打包成品"
       uses: actions/upload-artifact@v4
       with:
-        name: 最终成品
+        name: RustDesk成品_%{{ github.run_number }}
         path: |
-          build_output/x86_64-pc-windows-msvc/release/rustdesk.exe
-          build_output/x86_64-pc-windows-msvc/release/*.dll
+          build_output/x86_64-pc-windows-msvc/%{{ inputs.构建模式 }}%/rustdesk.exe
+          build_output/x86_64-pc-windows-msvc/%{{ inputs.构建模式 }}%/*.dll
