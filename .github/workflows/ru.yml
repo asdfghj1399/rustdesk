@@ -1,97 +1,70 @@
-name: Rust Build with Manual Trigger
+name: Rust CI/CD Pipeline (修正版)
 
 on:
-  # 手动触发配置
   workflow_dispatch:
-    inputs:
-      build-type:
-        description: '选择构建类型'
-        required: true
-        default: 'release'
-        type: choice
-        options: 
-          - debug
-          - release
-      architecture:
-        description: '目标架构'
-        required: true
-        default: 'x64'
+    inputs: # 手动触发参数区
+      build-mode:
+        description: '构建模式'
         type: choice
         options:
-          - x86
-          - x64
-      clean-build:
-        description: '是否清除缓存'
+          - debug
+          - release
+        default: 'release'
+      clean-cache:
+        description: '清除缓存'
         type: boolean
         default: false
-      test-mode:
-        description: '启用测试模式'
-        type: boolean
-        default: false
-
-  # 自动触发配置（可选）
-  push:
-    branches: [ main ]
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_VERSION: stable
-  TARGET_DIR: target/${{ github.event.inputs.build-type }}
+  RUST_TOOLCHAIN: "1.75.0"
+  TARGET_ARCH: "x86_64-pc-windows-msvc"
+  CACHE_NAME: rust-cargo-cache
 
 jobs:
-  build:
-    name: Build Project
+  setup: # 环境准备工单
     runs-on: windows-latest
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Setup Rust 🦀
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: ${{ env.RUST_VERSION }}
-        components: rustfmt, clippy
-        override: true
-
-    - name: Cache Dependencies 📦
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          ${{ env.TARGET_DIR }}
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Clean Cache 🔥
-      if: ${{ github.event.inputs.clean-build }}
-      run: cargo clean
-
-    - name: Build Project 🛠️
-      run: |
-        cargo build \
-          --${{ github.event.inputs.build-type }} \
-          --target ${{ github.event.inputs.architecture }}-pc-windows-msvc
+      - name: Checkout Code 🛎️
+        uses: actions/checkout@v3 # 重要: 使用可用的版本
         
-        if [ -f "${{ env.TARGET_DIR }}/your-app.exe" ]; then
-          echo "::notice::Build succeeded!"
-        else
-          echo "::error::Executable file not found!"
-          exit 1
-        fi
+      - name: Rust Toolchain 🦀
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.TARGET_ARCH }}
 
-    - name: Upload Artifacts 📤
-      if: success()
-      uses: actions/upload-artifact@v3
-      with:
-        name: build-output
-        path: ${{ env.TARGET_DIR }}/your-app.exe
+      - name: Cache Dependencies 📦
+        uses: actions/cache@v3 # 使用确认存在的版本
+        with:
+          path: |
+            ~/.cargo/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-  test:
-    name: Run Tests
-    needs: build
-    if: ${{ github.event.inputs.test-mode }}
-    runs-on: ubuntu-latest
+  build: # 构建工单
+    needs: setup
+    runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
-    - run: cargo test --verbose
+      - name: Clean Workspace (可选)
+        if: ${{ inputs.clean-cache }}
+        run: |
+          cargo clean
+          Remove-Item -Recurse $env:CARGO_HOME\registry\cache
+          
+      - name: Build Release 🛠️
+        run: cargo build --${{ inputs.build-mode }}
+        
+      - name: Upload Artifact 🚀
+        uses: actions/upload-artifact@v3 # 手动修复后的正确版本
+        with: 
+          name: binary-output
+          path: |
+            target/${{ inputs.build-mode }}/your-app.exe
+            target/${{ inputs.build-mode }}/your-app.pdb
+    
+  test: # 测试工单
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v3
+      - run: cargo test --all-features --verbose
