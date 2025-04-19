@@ -1,52 +1,106 @@
-name: CI Pipeline with Path Fixes
+name: RustDesk CI/CD (完整修正版)
 
 on:
   workflow_dispatch:
     inputs:
-      clean-build:
-        description: 'Perform deep clean'
+      build-mode:
+        description: "构建模式"
+        type: choice
+        options: 
+          - debug
+          - release
+        default: release
+      clean-all:
+        description: "完全清理工作区"
         type: boolean
         default: false
 
 env:
-  VCPKG_ROOT: C:\vcpkg  # 使用Windows原生路径格式
+  CARGO_HOME: ${{ github.workspace }}/.cargo
+  RUST_TOOLCHAIN: "1.75.0"
+  VCPKG_ROOT: "C:\\vcpkg"  # 使用Windows路径格式
 
 jobs:
-  setup:
+  init:
+    name: 初始化环境
     runs-on: windows-latest
     steps:
-      - name: Checkout code
+      - name: 检出代码（含子模块）
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          path: src
 
-      - name: Clean workspace (PowerShell)
-        if: ${{ inputs.clean-build }}
+      - name: 修复子模块路径
         shell: powershell
         run: |
-          # 安全删除目录（Windows原生方式）
-          if (Test-Path $env:VCPKG_ROOT) {
-              Remove-Item -Path $env:VCPKG_ROOT -Recurse -Force -ErrorAction Stop
-              Write-Output "成功清理vcpkg目录"
-          } else {
-              Write-Output "vcpkg目录不存在，跳过清理"
-          }
+          # 强制重置子模块
+          git submodule deinit -f .
+          git submodule update --init --recursive --force
+          Set-Location libs/hbb_common
+          git reset --hard HEAD
+          Set-Location $env:GITHUB_WORKSPACE
 
-          # 附加清理其他缓存
-          Remove-Item -Path target -Recurse -ErrorAction SilentlyContinue
+  setup:
+    name: 环境配置
+    needs: init
+    runs-on: windows-latest
+    steps:
+      - name: 清理工作区
+        if: ${{ inputs.clean-all }}
+        shell: powershell
+        run: |
+          Remove-Item -Recurse $env:VCPKG_ROOT -ErrorAction SilentlyContinue
+          Remove-Item -Recurse target -ErrorAction SilentlyContinue
           cargo clean
 
-      - name: Bootstrap vcpkg
-        shell: cmd  # 使用CMD处理路径
+      - name: 安装Rust工具链
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+          override: true
+
+      - name: 配置VCPKG
+        shell: powershell
         run: |
-          if exist "%VCPKG_ROOT%" (
-              rmdir /s /q "%VCPKG_ROOT%"
-          )
-          git clone https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
-          cd "%VCPKG_ROOT%"
-          .\bootstrap-vcpkg.bat
+          if (-not (Test-Path $env:VCPKG_ROOT)) {
+              git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+              & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+          }
+          $env:PATH = "$env:VCPKG_ROOT;$env:PATH"
 
   build:
+    name: 项目构建
     needs: setup
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: cargo build --release
+      - name: 构建项目
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --${{ inputs.build-mode }} --manifest-path ./libs/hbb_common/Cargo.toml
+          cargo build --${{ inputs.build-mode }} --bin rustdesk
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-bin
+          path: |
+            target/${{ inputs.build-mode }}/rustdesk.exe
+            target/${{ inputs.build-mode }}/*.dll
+          retention-days: 7
+
+  post-build:
+    name: 清理缓存
+    needs: build
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - name: 清理临时文件
+        shell: powershell
+        run: |
+          Remove-Item -Recurse $env:CARGO_HOME\registry\cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse $env:CARGO_HOME\git\db -ErrorAction SilentlyContinue
