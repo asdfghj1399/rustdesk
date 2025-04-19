@@ -1,106 +1,81 @@
-name: RustDesk CI/CD (完整修正版)
+name: RustDesk CI/CD (路径修复版)
 
 on:
   workflow_dispatch:
     inputs:
-      build-mode:
-        description: "构建模式"
-        type: choice
-        options: 
-          - debug
-          - release
-        default: release
-      clean-all:
-        description: "完全清理工作区"
+      verbose:
+        description: "显示详细日志"
         type: boolean
         default: false
 
-env:
-  CARGO_HOME: ${{ github.workspace }}/.cargo
-  RUST_TOOLCHAIN: "1.75.0"
-  VCPKG_ROOT: "C:\\vcpkg"  # 使用Windows路径格式
-
 jobs:
-  init:
-    name: 初始化环境
-    runs-on: windows-latest
-    steps:
-      - name: 检出代码（含子模块）
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-          path: src
-
-      - name: 修复子模块路径
-        shell: powershell
-        run: |
-          # 强制重置子模块
-          git submodule deinit -f .
-          git submodule update --init --recursive --force
-          Set-Location libs/hbb_common
-          git reset --hard HEAD
-          Set-Location $env:GITHUB_WORKSPACE
-
   setup:
-    name: 环境配置
-    needs: init
     runs-on: windows-latest
     steps:
-      - name: 清理工作区
-        if: ${{ inputs.clean-all }}
-        shell: powershell
-        run: |
-          Remove-Item -Recurse $env:VCPKG_ROOT -ErrorAction SilentlyContinue
-          Remove-Item -Recurse target -ErrorAction SilentlyContinue
-          cargo clean
+    - name: Checkout with Submodules
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+        path: src
+        # 强制重置子模块缓存
+        clean: true
 
-      - name: 安装Rust工具链
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-pc-windows-msvc
-          override: true
+    - name: Validate Submodules
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        
+        # 列出所有子模块状态
+        Write-Output "##[group]Submodule Status"
+        git submodule status --recursive
+        Write-Output "##[endgroup]"
 
-      - name: 配置VCPKG
-        shell: powershell
-        run: |
-          if (-not (Test-Path $env:VCPKG_ROOT)) {
-              git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-              & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
-          }
-          $env:PATH = "$env:VCPKG_ROOT;$env:PATH"
+        # 验证关键路径
+        $criticalPaths = @(
+            "$env:GITHUB_WORKSPACE/src/libs/hbb_common",
+            "$env:GITHUB_WORKSPACE/src/libs/hbb_common/Cargo.toml"
+        )
+
+        foreach ($path in $criticalPaths) {
+            if (-not (Test-Path $path)) {
+                Write-Output "::error::关键路径缺失: $path"
+                Get-ChildItem "$env:GITHUB_WORKSPACE/src/libs" -Recurse
+                exit 1
+            }
+        }
+
+        # 转换Unix路径为Windows格式
+        $hbbPath = "$env:GITHUB_WORKSPACE/src/libs/hbb_common" -replace '/', '\'
+        Set-Location $hbbPath
+        Write-Output "当前工作目录: $(Get-Location)"
 
   build:
-    name: 项目构建
     needs: setup
     runs-on: windows-latest
     steps:
-      - name: 构建项目
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo build --${{ inputs.build-mode }} --manifest-path ./libs/hbb_common/Cargo.toml
-          cargo build --${{ inputs.build-mode }} --bin rustdesk
+    - name: Build hbb_common
+      shell: powershell
+      run: |
+        # 使用绝对路径
+        $hbbPath = "$env:GITHUB_WORKSPACE/src/libs/hbb_common"
+        
+        # 构建子模块
+        cargo build --manifest-path "$hbbPath\Cargo.toml" --verbose
+        
+        # 验证构建产物
+        if (-not (Test-Path "$hbbPath\target\debug\hbb_common.rlib")) {
+            Get-ChildItem "$hbbPath\target" -Recurse
+            exit 1
+        }
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-bin
-          path: |
-            target/${{ inputs.build-mode }}/rustdesk.exe
-            target/${{ inputs.build-mode }}/*.dll
-          retention-days: 7
+    - name: Build Main Project
+      run: cargo build --release
 
-  post-build:
-    name: 清理缓存
-    needs: build
-    if: always()
-    runs-on: windows-latest
-    steps:
-      - name: 清理临时文件
-        shell: powershell
-        run: |
-          Remove-Item -Recurse $env:CARGO_HOME\registry\cache -ErrorAction SilentlyContinue
-          Remove-Item -Recurse $env:CARGO_HOME\git\db -ErrorAction SilentlyContinue
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-output
+        path: |
+          target/release/rustdesk.exe
+          target/release/*.dll
