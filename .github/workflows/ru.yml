@@ -27,18 +27,16 @@ jobs:
         Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
 
-    # 2. 检出代码（使用 checkout@v4）
+    # 2. 检出代码
     - name: "📥 Checkout Code"
       uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0
 
-    # 3. 设置Rust（官方推荐方式）
+    # 3. 设置Rust（使用完整版本号）
     - name: "🦀 Setup Rust"
-      uses: actions-rust-lang/setup-rust@v1
+      uses: actions-rust-lang/setup-rust@v1.5.0  # 使用明确版本号
       with:
         target: x86_64-pc-windows-msvc
+        profile: minimal
 
     # 4. 安装vcpkg
     - name: "📦 Install vcpkg"
@@ -51,11 +49,9 @@ jobs:
           .\bootstrap-vcpkg.bat -disableMetrics
         }
 
-    # 5. 安装依赖（带中国镜像加速）
+    # 5. 安装依赖
     - name: "🧩 Install Dependencies"
       shell: powershell
-      env:
-        VCPKG_BINARY_SOURCES: "clear;nuget,https://mirrors.ustc.edu.cn/vcpkg,read"
       run: |
         & "$env:VCPKG_ROOT/vcpkg" install @(
           "libvpx[core]",
@@ -74,7 +70,7 @@ jobs:
           exit 1
         }
 
-    # 7. 上传产物（使用 upload-artifact@v4）
+    # 7. 上传产物
     - name: "📦 Upload Artifact"
       if: success()
       uses: actions/upload-artifact@v4
