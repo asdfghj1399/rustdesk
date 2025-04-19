@@ -26,26 +26,17 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Install system dependencies (Fixed)
+    - name: Install system dependencies
       shell: powershell
       run: |
-        # 修复1：完整的Chocolatey安装流程
         Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        $chocoScript = Join-Path $env:TEMP 'choco-install.ps1'
-        Invoke-WebRequest -Uri 'https://community.chocolatey.org/install.ps1' -OutFile $chocoScript -UseBasicParsing
-        & $chocoScript
-        Start-Sleep -Seconds 5  # 等待环境更新
-        
-        # 修复2：正确处理环境刷新
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
         Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + 
                     [System.Environment]::GetEnvironmentVariable('PATH', 'User')
         
-        # 修复3：避免重复安装LLVM
-        choco upgrade -y cmake git python
-        choco install -y llvm --version=15.0.6 --force
-        choco install -y nasm
+        choco install -y cmake git python llvm --version=15.0.6 nasm
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@v1
@@ -53,7 +44,7 @@ jobs:
         toolchain: ${{ env.RUST_VERSION }}
         targets: x86_64-pc-windows-msvc
 
-    - name: Setup vcpkg
+    - name: Setup vcpkg (Fixed)
       shell: powershell
       run: |
         $vcpkgDir = "$env:GITHUB_WORKSPACE\vcpkg"
@@ -63,7 +54,7 @@ jobs:
             Remove-Item -Recurse -Force $vcpkgDir
         }
         
-        # 修复4：更可靠的vcpkg克隆方式
+        # 修复克隆方式
         git config --global core.longpaths true
         git clone https://github.com/microsoft/vcpkg $vcpkgDir
         cd $vcpkgDir
@@ -76,19 +67,26 @@ jobs:
         & "$vcpkgDir\bootstrap-vcpkg.bat" -disableMetrics
         & "$vcpkgDir\vcpkg" integrate install
 
-    - name: Install vcpkg dependencies
+    - name: Install vcpkg dependencies (Fixed)
       shell: powershell
       run: |
-        cd "$env:GITHUB_WORKSPACE\vcpkg"
+        $vcpkgDir = "$env:GITHUB_WORKSPACE\vcpkg"
         $ErrorActionPreference = "Stop"
         
-        # 分步安装依赖
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET libvpx
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET libyuv
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET openssl
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET opus
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET ffmpeg[core,avcodec,avformat,swresample,swscale]
-        .\vcpkg install --triplet=$env:VCPKG_DEFAULT_TRIPLET aom[core]
+        # 修复1：使用完整路径调用vcpkg
+        $vcpkgExe = "$vcpkgDir\vcpkg"
+        
+        # 修复2：正确的参数格式
+        & $vcpkgExe install libvpx --triplet=$env:VCPKG_DEFAULT_TRIPLET
+        & $vcpkgExe install libyuv --triplet=$env:VCPKG_DEFAULT_TRIPLET
+        & $vcpkgExe install openssl --triplet=$env:VCPKG_DEFAULT_TRIPLET
+        & $vcpkgExe install opus --triplet=$env:VCPKG_DEFAULT_TRIPLET
+        
+        # 修复3：分步安装复杂依赖
+        & $vcpkgExe install ffmpeg --triplet=$env:VCPKG_DEFAULT_TRIPLET `
+          --feature=core,avcodec,avformat,swresample,swscale
+        
+        & $vcpkgExe install aom --triplet=$env:VCPKG_DEFAULT_TRIPLET --feature=core
 
     - name: Build RustDesk
       shell: powershell
