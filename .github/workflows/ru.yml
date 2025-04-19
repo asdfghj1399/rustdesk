@@ -10,7 +10,8 @@ on:
 env:
   RUST_VERSION: "1.75.0"
   VERSION: "1.3.9"
-  BUILD_DIR: "flutter/build/windows/x64/runner/Release"
+  BUILD_DIR: "target/release"
+  FLUTTER_BUILD_DIR: "flutter/build/windows/x64/runner/Release"
 
 jobs:
   build:
@@ -35,48 +36,43 @@ jobs:
     - name: Install dependencies
       shell: powershell
       run: |
-        choco install -y cmake git python llvm nasm
+        choco install -y cmake git python llvm --version=15.0.6 nasm
         python -m pip install --upgrade pip
+        flutter doctor -v
 
-    - name: Build RustDesk
+    - name: Build Rust backend
       shell: powershell
       run: |
-        # 确保构建目录存在
-        if (-not (Test-Path "build")) {
-            mkdir build
+        cd rust
+        cargo build --release --features hwcodec,vram,flutter
+        if (-not (Test-Path "$env:BUILD_DIR/rustdesk.exe")) {
+            throw "Rust build failed - rustdesk.exe not found"
         }
-        cd build
-        
-        # 生成构建系统
-        cmake .. -DCMAKE_BUILD_TYPE=Release
-        
-        # 开始构建
-        cmake --build . --config Release --target rustdesk -j 2
 
-    - name: Verify build output
+    - name: Build Flutter frontend
       shell: powershell
       run: |
-        $exePath = "$env:GITHUB_WORKSPACE/$env:BUILD_DIR/rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-            throw "Build failed - rustdesk.exe not found at $exePath"
+        flutter pub get
+        flutter build windows --release
+        if (-not (Test-Path "$env:FLUTTER_BUILD_DIR/rustdesk.exe")) {
+            throw "Flutter build failed - rustdesk.exe not found"
         }
-        Write-Output "Build successful! Executable size: $( (Get-Item $exePath).Length / 1MB ) MB"
+
+    - name: Merge builds
+      shell: powershell
+      run: |
+        # 复制Rust构建的可执行文件到Flutter构建目录
+        Copy-Item "rust/$env:BUILD_DIR/rustdesk.exe" -Destination "$env:FLUTTER_BUILD_DIR" -Force
 
     - name: Package artifacts
       shell: powershell
       run: |
-        # 创建发布包
         $artifactDir = "release_$env:VERSION"
-        mkdir $artifactDir
+        New-Item -ItemType Directory -Path $artifactDir -Force
         
-        # 复制主程序
-        Copy-Item "$env:BUILD_DIR/rustdesk.exe" -Destination $artifactDir
-        
-        # 复制依赖文件
-        $dlls = Get-ChildItem "$env:BUILD_DIR" -Filter *.dll
-        foreach ($dll in $dlls) {
-            Copy-Item $dll.FullName -Destination $artifactDir
-        }
+        # 复制所有必要文件
+        Copy-Item "$env:FLUTTER_BUILD_DIR/rustdesk.exe" -Destination $artifactDir
+        Copy-Item "$env:FLUTTER_BUILD_DIR/*.dll" -Destination $artifactDir
         
         # 创建ZIP包
         Compress-Archive -Path "$artifactDir/*" -DestinationPath "rustdesk-$env:VERSION.zip" -Force
@@ -87,5 +83,5 @@ jobs:
         name: rustdesk-windows
         path: |
           rustdesk-$env:VERSION.zip
-          ${{ env.BUILD_DIR }}/rustdesk.exe
+          ${{ env.FLUTTER_BUILD_DIR }}/rustdesk.exe
         retention-days: 7
