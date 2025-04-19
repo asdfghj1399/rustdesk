@@ -1,73 +1,88 @@
-name: Rust CI/CD Pipeline (修正版)
+name: RustDesk CI
 
 on:
   workflow_dispatch:
     inputs:
-      build-mode:
-        description: "构建模式"
+      build-type:
+        description: 'Build type'
+        required: true
+        default: 'release'
         type: choice
-        options: 
-          - debug
-          - release
-        default: "release"
-      clean-cache:
-        description: "清除缓存"
-        type: boolean
-        default: false
+        options: [release, debug]
 
 env:
-  RUST_TOOLCHAIN: "1.75.0"
-  TARGET_ARCH: "x86_64-pc-windows-msvc"
+  RUST_VERSION: "1.75.0"
+  FLUTTER_VERSION: "3.24.5"
+  PYTHON_VERSION: "3.9.13"
+  LLVM_VERSION: "15.0.7"
+  NASM_VERSION: "2.16.01"
 
 jobs:
-  setup:
-    name: 环境准备
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码 ✔️
-        uses: actions/checkout@v4
-
-      - name: 安装Rust工具链 🦀
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ env.TARGET_ARCH }}
-
   build:
-    name: 项目构建
-    needs: setup
     runs-on: windows-latest
+    timeout-minutes: 45
+
     steps:
-      - name: 清理工作区 🔥
-        if: ${{ inputs.clean-cache }}
-        run: |
-          Remove-Item -Recurse target -ErrorAction SilentlyContinue
-          cargo clean
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
 
-      - name: 设置缓存 📦
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Fix Permissions
+      shell: powershell
+      run: |
+        # 权限修复脚本（如上）
 
-      - name: 编译项目 🛠️
-        run: cargo build --${{ inputs.build-mode }}
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: ${{ env.RUST_VERSION }}
+        target: x86_64-pc-windows-msvc
+        components: rustfmt, clippy
 
-      - name: 上传产物 🚀
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: |
-            target/${{ inputs.build-mode }}/*.exe
-            target/${{ inputs.build-mode }}/*.pdb
+    - name: Setup Flutter (Fixed)
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        architecture: x64
+        cache-path: ${{ runner.temp }}/flutter_cache
+        pub-cache-path: ${{ runner.temp }}/pub_cache
 
-  test:
-    name: 运行测试
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --all-features
+    - name: Install Dependencies
+      shell: powershell
+      run: |
+        choco install -y python --version=${{ env.PYTHON_VERSION }}
+        choco install -y llvm --version=${{ env.LLVM_VERSION }}
+        choco install -y nasm --version=${{ env.NASM_VERSION }}
+        refreshenv
+
+    - name: Build Project
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        
+        # 设置环境变量
+        $env:Path += ";C:\Program Files\LLVM\bin"
+        $env:VCPKG_ROOT = "C:\vcpkg"
+        
+        # 构建命令
+        cargo build --${{ inputs.build-type }} --target x86_64-pc-windows-msvc -vv
+        
+        # 验证输出
+        if (-not (Test-Path "target\${{ inputs.build-type }}\rustdesk.exe")) {
+          Write-Output "::error::Build failed!"
+          Get-ChildItem target\${{ inputs.build-type }}
+          exit 1
+        }
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-binaries
+        path: |
+          target/${{ inputs.build-type }}/rustdesk.exe
+          target/${{ inputs.build-type }}/*.dll
+        retention-days: 7
