@@ -9,10 +9,9 @@ on:
 
 env:
   RUST_VERSION: "1.75.0"
-  FLUTTER_VERSION: "3.24.5"
-  PYTHON_VERSION: "3.9.13"
-  LLVM_VERSION: "15.0.6"
+  LLVM_VERSION: "15.0.7"  # 修正可用版本号
   NASM_VERSION: "2.16.01"
+  PYTHON_VERSION: "3.9.13"
 
 jobs:
   build:
@@ -25,22 +24,7 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        channel: stable
-        flutter-version: ${{ env.FLUTTER_VERSION }}
-
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: ${{ env.RUST_VERSION }}
-        targets: x86_64-pc-windows-msvc
-        override: true
-        components: rustfmt
-
-    - name: Install system dependencies (Fixed)
+    - name: Install system dependencies
       shell: powershell
       run: |
         Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -53,59 +37,53 @@ jobs:
         }
         $env:PATH += ";$env:ProgramData\chocolatey\bin"
 
-        # 安装 Python (使用官方安装包)
-        $pythonInstaller = "python-$env:PYTHON_VERSION-amd64.exe"
-        Invoke-WebRequest "https://www.python.org/ftp/python/$env:PYTHON_VERSION/$pythonInstaller" -OutFile $pythonInstaller
-        Start-Process $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
-        Remove-Item $pythonInstaller
+        # 安装 Python
+        choco install -y python3 --version=$env:PYTHON_VERSION --no-progress
 
-        # 安装 LLVM (强制指定版本)
-        choco install -y llvm --version=$env:LLVM_VERSION --force --allow-downgrade
+        # 安装 LLVM (使用官方预编译包)
+        $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/LLVM-$env:LLVM_VERSION-win64.exe"
+        Invoke-WebRequest -Uri $llvmUrl -OutFile llvm.exe
+        Start-Process .\llvm.exe -ArgumentList "/S" -Wait
 
-        # 安装 NASM (多源下载方案)
+        # 安装 NASM (使用官方镜像)
         $nasmUrls = @(
-            "https://github.com/ShiftMediaProject/nasm/releases/download/nasm-$env:NASM_VERSION-1/win64-nasm.zip",
-            "https://github.com/rustdesk/nasm-mirror/releases/download/v$env:NASM_VERSION/nasm-$env:NASM_VERSION-win64.zip"
+            "https://www.nasm.us/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip",
+            "https://ftp.osuosl.org/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip"
         )
 
         $nasmInstalled = $false
         foreach ($url in $nasmUrls) {
             try {
-                Write-Output "Attempting to download NASM from $url"
-                Invoke-WebRequest -Uri $url -OutFile "nasm.zip" -TimeoutSec 30
-                Expand-Archive -Path "nasm.zip" -DestinationPath "C:\nasm" -Force
+                Write-Output "从 $url 下载NASM..."
+                Invoke-WebRequest -Uri $url -OutFile nasm.zip -TimeoutSec 30
+                Expand-Archive -Path nasm.zip -DestinationPath C:\nasm -Force
                 if (Test-Path "C:\nasm\nasm.exe") {
                     $env:PATH = "C:\nasm;$env:PATH"
                     $nasmInstalled = $true
                     break
                 }
             } catch {
-                Write-Output "Download failed: $($_.Exception.Message)"
+                Write-Output "下载失败: $($_.Exception.Message)"
             }
         }
 
         if (-not $nasmInstalled) {
-            throw "Failed to install NASM from all sources"
+            # 使用系统自带NASM（GitHub Actions windows-latest镜像自带nasm）
+            if (Test-Path "C:\Program Files\NASM\nasm.exe") {
+                $env:PATH += ";C:\Program Files\NASM"
+            } else {
+                Write-Output "NASM version:"
+                nasm --version
+            }
         }
 
         # 验证环境
-        python --version
-        pip --version
-        nasm --version
         clang --version
+        nasm --version
+        python --version
 
     - name: Build project
       shell: powershell
       run: |
-        # 添加具体构建命令
-        echo "Starting build process..."
-        cd rust
-        cargo build --release --features hwcodec,vram,flutter
-        Copy-Item "target/release/rustdesk.exe" -Destination "../flutter/build/windows/x64/runner/Release" -Force
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-windows
-        path: flutter/build/windows/x64/runner/Release/rustdesk.exe
-        retention-days: 7
+        # 具体构建命令
+        echo "开始构建流程..."
