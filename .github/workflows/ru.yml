@@ -1,82 +1,34 @@
-name: Build RustDesk (Windows)
+- name: Install system dependencies
+  shell: powershell
+  run: |
+    $ErrorActionPreference = "Stop"
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    $ProgressPreference = 'SilentlyContinue'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-on:
-  workflow_dispatch: {}
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    # NASM 安装部分修复
+    $nasmUrls = @(
+        "https://www.nasm.us/pub/nasm/stable/win64/nasm-${env:NASM_VERSION}-win64.zip",
+        "https://ftp.osuosl.org/pub/nasm/releasebuilds/${env:NASM_VERSION}/win64/nasm-${env:NASM_VERSION}-win64.zip"
+    )
 
-env:
-  RUST_VERSION: "1.75.0"
-  NASM_VERSION: "2.16.01"
-
-jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 120
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install system dependencies
-      shell: powershell
-      run: |
-        $ErrorActionPreference = "Stop"
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        $ProgressPreference = 'SilentlyContinue'
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-        # 验证系统自带NASM
-        $systemNasm = $false
-        if (Test-Path "C:\Program Files\NASM\nasm.exe") {
-            $env:PATH += ";C:\Program Files\NASM"
-            $systemNasm = $true
-        } elseif (Test-Path "$env:WINDIR\System32\nasm.exe") {
-            $systemNasm = $true
-        }
-
-        if (-not $systemNasm) {
-            # 多源下载方案（验证可用的下载源）
-            $nasmUrls = @(
-                "https://www.nasm.us/pub/nasm/stable/win64/nasm-${env:NASM_VERSION}-win64.zip",
-                "https://ftp.osuosl.org/pub/nasm/releasebuilds/${env:NASM_VERSION}/win64/nasm-${env:NASM_VERSION}-win64.zip"
-            )
-
-            foreach ($url in $nasmUrls) {
-                try {
-                    Write-Output "正在尝试从 $url 下载NASM..."
-                    Invoke-WebRequest -Uri $url -OutFile nasm.zip -TimeoutSec 30
-                    Expand-Archive -Path nasm.zip -DestinationPath C:\nasm -Force
-                    
-                    if (Test-Path "C:\nasm\nasm.exe") {
-                        $env:PATH = "C:\nasm;${env:PATH}"
-                        Write-Output "NASM安装成功"
-                        break
-                    }
-                } catch {
-                    Write-Output "下载失败: $($_.Exception.Message)"
-                }
-            }
-        }
-
-        # 最终验证NASM安装
+    foreach ($url in $nasmUrls) {
         try {
-            $nasmPath = (Get-Command nasm).Source
-            Write-Output "NASM路径: ${nasmPath}"
-            nasm --version
+            Write-Output "正在尝试从 $url 下载NASM..."
+            Invoke-WebRequest -Uri $url -OutFile nasm.zip -TimeoutSec 30
+            Expand-Archive -Path nasm.zip -DestinationPath C:\nasm -Force
+            
+            if (Test-Path "C:\nasm\nasm.exe") {
+                $env:PATH = "C:\nasm;${env:PATH}"
+                Write-Output "NASM安装成功"
+                break
+            }
         } catch {
-            throw "NASM安装失败，最后尝试路径: ${env:PATH}"
+            Write-Output "下载失败: $($_.Exception.Message)"
+            continue
         }
+    }
 
-    - name: Build verification
-      shell: powershell
-      run: |
-        # 示例构建命令
-        echo "PATH环境变量:"
-        echo $env:PATH
-        echo "NASM版本信息:"
-        nasm --version
+    if (-not (Test-Path "C:\nasm\nasm.exe")) {
+        throw "NASM 安装失败: 所有镜像源均不可用"
+    }
