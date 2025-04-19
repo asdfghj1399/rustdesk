@@ -1,19 +1,17 @@
-name: "🛠️ RustDesk Windows CI (Stable)"
+name: "RustDesk Windows CI (Stable)"
 
 on:
   workflow_dispatch:
     inputs:
-      build_type:
-        description: "Build configuration"
-        required: true
-        default: "release"
-        type: choice
-        options: ["release", "debug"]
+      clean_install:
+        description: "Full clean install"
+        type: boolean
+        default: false
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   VCPKG_BINARY_SOURCES: "clear;default,readwrite"  # 修复缓存配置
-  VCPKG_DISABLE_METRICS: "true"
+  VCPKG_FEATURE_FLAGS: "-versions,-manifests"      # 禁用问题功能
 
 jobs:
   build:
@@ -22,9 +20,9 @@ jobs:
 
     steps:
     - name: "1️⃣ Clean Workspace"
+      if: ${{ inputs.clean_install }}
       shell: powershell
       run: |
-        # 清理旧构建残留
         Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
 
@@ -32,7 +30,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: src
 
     - name: "3️⃣ Setup vcpkg"
       shell: powershell
@@ -45,32 +42,18 @@ jobs:
 
     - name: "4️⃣ Install Dependencies (Fixed)"
       shell: powershell
-      working-directory: src
       run: |
-        # 禁用问题配置
-        $env:VCPKG_FEATURE_FLAGS = "-versions"
-        
         & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx[core]",
-          "libyuv[core]",
-          "openssl[core]"
+          "libvpx",
+          "libyuv",
+          "openssl"
         ) --triplet x64-windows `
           --clean-after-build `
           --recurse `
-          --x-asset-sources=clear
+          --x-asset-sources=clear `
+          --x-no-default-features
 
     - name: "5️⃣ Build Project"
       shell: powershell
-      working-directory: src
       run: |
-        cargo build --${{ inputs.build_type }} `
-          --target x86_64-pc-windows-msvc `
-          --config "build.rustflags=['-C', 'target-feature=+crt-static']"
-
-    - name: "6️⃣ Upload Artifacts"
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-${{ inputs.build_type }}
-        path: |
-          src/target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
-          src/target/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
+        cargo build --release --target x86_64-pc-windows-msvc
