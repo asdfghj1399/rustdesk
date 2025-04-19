@@ -10,7 +10,7 @@ on:
       enable_hwcodec:
         description: "Enable hardware acceleration"
         type: boolean
-        default: true
+        default: false  # 默认禁用硬件加速
 
 env:
   VERSION: "1.3.9"
@@ -84,26 +84,50 @@ jobs:
         .\bootstrap-vcpkg.bat -disableMetrics
         .\vcpkg integrate install
 
+    - name: Install vcpkg dependencies
+      shell: powershell
+      run: |
+        .\vcpkg\vcpkg install --triplet x64-windows-static `
+          libvpx libyuv openssl opus ffmpeg aom
+
     - name: Build RustDesk (Fixed)
       shell: powershell
       run: |
-        # 修复参数传递方式
-        $argsList = @("--flutter", "--vram")
+        # 根据输入决定是否启用硬件加速
+        $hwcodecArg = ""
         if ('${{ inputs.enable_hwcodec }}' -eq 'true') {
-            $argsList += "--hwcodec"
+            # 确保硬件加速依赖存在
+            if (-not (Test-Path "$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows-static\bin\avcodec-58.dll")) {
+                Write-Output "Warning: Hardware acceleration dependencies not found, disabling hwcodec"
+            } else {
+                $hwcodecArg = "--hwcodec"
+            }
         }
         
-        # 添加便携版参数
-        $argsList += "--portable"
-        $argsList += "--skip-portable-pack"
+        # 构建参数
+        $argsList = @("--flutter", "--vram", "--portable", "--skip-portable-pack")
+        if ($hwcodecArg -ne "") {
+            $argsList += $hwcodecArg
+        }
+        
+        Write-Output "Building with arguments: $argsList"
         
         # 执行构建
-        Write-Output "Running build.py with arguments: $argsList"
         python .\build.py $argsList
         
         # 验证构建结果
         if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
-            throw "Build failed - rustdesk.exe not found!"
+            # 尝试不带硬件加速的构建
+            if ($hwcodecArg -ne "") {
+                Write-Output "Retrying build without hwcodec..."
+                python .\build.py --flutter --vram --portable --skip-portable-pack
+                
+                if (-not (Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
+                    throw "Build failed even without hwcodec"
+                }
+            } else {
+                throw "Build failed - rustdesk.exe not found!"
+            }
         }
 
     - name: Package artifacts
