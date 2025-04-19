@@ -1,81 +1,129 @@
-name: "RustDesk Windows CI (Stable)"
+name: RustDesk Windows CI
 
 on:
   workflow_dispatch:
     inputs:
-      clean_cache:
-        description: "Clean all build caches"
+      clean_build:
+        description: "Full clean rebuild"
         type: boolean
         default: false
 
 env:
-  VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_FEATURE_FLAGS: "-binarycaching"
-  RUST_BACKTRACE: "full"
+  VCPKG_ROOT: "${{ github.workspace }}/vcpkg"  # 避免权限问题
+  RUSTUP_TOOLCHAIN: "stable-x86_64-pc-windows-msvc"  # 明确指定工具链
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-    # 1. 清理缓存（可选）
-    - name: "🔥 Clean Cache"
-      if: ${{ inputs.clean_cache }}
+    # 1. 智能清理系统
+    - name: "🧹 Clean Workspace"
+      if: ${{ inputs.clean_build }}
       shell: powershell
       run: |
-        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        # 多层级清理
         Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/vcpkg" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:RUNNER_TEMP/.cargo" -ErrorAction SilentlyContinue
 
-    # 2. 检出代码
+    # 2. 快速代码检出
     - name: "📥 Checkout Code"
       uses: actions/checkout@v4
-
-    # 3. 设置Rust（使用完整版本号）
-    - name: "🦀 Setup Rust"
-      uses: actions-rust-lang/setup-rust@v1.5.0  # 使用明确版本号
       with:
-        target: x86_64-pc-windows-msvc
-        profile: minimal
+        submodules: "recursive"
+        fetch-depth: 1  # 加速克隆
 
-    # 4. 安装vcpkg
-    - name: "📦 Install vcpkg"
+    # 3. Rust 环境配置（国内优化版）
+    - name: "🦀 Rust Setup"
       shell: powershell
       run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT/vcpkg.exe")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          cd "$env:VCPKG_ROOT"
-          git checkout 2024.04.17
-          .\bootstrap-vcpkg.bat -disableMetrics
+        # 设置国内镜像
+        [System.Environment]::SetEnvironmentVariable('RUSTUP_DIST_SERVER', 'https://rsproxy.cn', [System.EnvironmentVariableTarget]::Process)
+        [System.Environment]::SetEnvironmentVariable('RUSTUP_UPDATE_ROOT', 'https://rsproxy.cn/rustup', [System.EnvironmentVariableTarget]::Process)
+        
+        # 安装 Rust（自动重试）
+        $retryCount = 0
+        while ($retryCount -lt 3) {
+          try {
+            iex "& { $(irm https://win.rustup.rs) } -y --default-toolchain $env:RUSTUP_TOOLCHAIN"
+            if ($LASTEXITCODE -eq 0) { break }
+          } catch {
+            $retryCount++
+            Start-Sleep -Seconds (10 * $retryCount)
+          }
         }
+        
+        # 验证安装
+        rustup default $env:RUSTUP_TOOLCHAIN
+        rustup target add x86_64-pc-windows-msvc
+        cargo --version
 
-    # 5. 安装依赖
+    # 4. vcpkg 极速安装
+    - name: "📦 vcpkg Setup"
+      shell: powershell
+      run: |
+        # 从国内镜像下载预编译vcpkg
+        $vcpkgUrl = "https://ghproxy.com/https://github.com/microsoft/vcpkg/releases/download/2024.04.17/vcpkg.exe"
+        New-Item -ItemType Directory -Path "$env:VCPKG_ROOT" -Force
+        (New-Object Net.WebClient).DownloadFile($vcpkgUrl, "$env:VCPKG_ROOT/vcpkg.exe")
+        
+        # 初始化
+        & "$env:VCPKG_ROOT/vcpkg" integrate install
+        & "$env:VCPKG_ROOT/vcpkg" version
+
+    # 5. 智能依赖安装
     - name: "🧩 Install Dependencies"
       shell: powershell
+      env:
+        VCPKG_BINARY_SOURCES: "clear;nuget,https://mirrors.ustc.edu.cn/vcpkg,read"
       run: |
-        & "$env:VCPKG_ROOT/vcpkg" install @(
+        # 关键依赖列表
+        $deps = @(
           "libvpx[core]",
           "libyuv[core]",
           "openssl[core]"
-        ) --triplet=x64-windows --clean-after-build --recurse
+        )
+        
+        foreach ($dep in $deps) {
+          $retry = 0
+          while ($retry -lt 3) {
+            try {
+              & "$env:VCPKG_ROOT/vcpkg" install $dep --triplet=x64-windows --clean-after-build
+              if ($LASTEXITCODE -eq 0) { break }
+            } catch {
+              $retry++
+              Start-Sleep -Seconds (30 * $retry)
+            }
+          }
+        }
 
-    # 6. 构建项目
+    # 6. 高级构建系统
     - name: "🔨 Build Release"
       shell: powershell
       run: |
+        # 环境配置
         $env:Path += ";$env:VCPKG_ROOT/installed/x64-windows/bin"
-        cargo build --release --target x86_64-pc-windows-msvc -vv
+        $env:RUSTFLAGS = "-C target-feature=+crt-static"
+        
+        # 并行编译（根据CPU核心数）
+        $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+        cargo build --release --target x86_64-pc-windows-msvc -j $cpuCount --verbose
+        
+        # 产物验证
         if (-not (Test-Path "target/release/rustdesk.exe")) {
           Write-Output "::error::Build failed!"
+          Get-Content Cargo.lock -Tail 20
           exit 1
         }
 
-    # 7. 上传产物
-    - name: "📦 Upload Artifact"
-      if: success()
+    # 7. 智能制品上传
+    - name: "📤 Upload Artifact"
       uses: actions/upload-artifact@v4
       with:
-        name: rustdesk-binaries
+        name: rustdesk-${{ github.run_id }}
         path: |
           target/release/rustdesk.exe
           target/release/*.dll
+        retention-days: 3
