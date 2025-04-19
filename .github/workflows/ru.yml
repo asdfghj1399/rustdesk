@@ -1,34 +1,122 @@
-- name: "4️⃣ Bulletproof Dependency Install"
-  shell: powershell
-  run: |
-    $retryCount = 0
-    $maxRetries = 3
-    $packages = @("libvpx[core]", "libyuv[core]", "openssl[core]")
-    
-    :install_loop while ($retryCount -lt $maxRetries) {
-      try {
-        Write-Output "::group::Attempt $($retryCount+1)"
-        & "$env:VCPKG_ROOT\vcpkg" install $packages `
-          --triplet=x64-windows `
-          --clean-after-build `
-          --recurse `
-          --x-asset-sources=clear
-        
-        if ($LASTEXITCODE -eq 0) { 
+name: "RustDesk Windows CI (Stable)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: "Clean all build caches (vcpkg + cargo)"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "${{ runner.temp }}/vcpkg"  # 使用临时目录避免权限问题
+  VCPKG_FEATURE_FLAGS: "-binarycaching"   # 禁用二进制缓存（确保源码编译）
+  RUST_BACKTRACE: "full"                  # 启用完整的Rust错误回溯
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+    # 1. 清理缓存（可选）
+    - name: "🔥 Nuclear Clean (Optional)"
+      if: ${{ inputs.clean_cache }}
+      shell: powershell
+      run: |
+        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
+
+    # 2. 检出代码（包含子模块）
+    - name: "📥 Checkout Repository"
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    # 3. 设置Rust工具链
+    - name: "🦀 Setup Rust"
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+        override: true
+
+    # 4. 安装vcpkg（锁定稳定版本）
+    - name: "📦 Install vcpkg"
+      shell: powershell
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT/vcpkg.exe")) {
+          Write-Output "::group::Cloning vcpkg"
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          git checkout 2024.04.17  # 锁定已知稳定版本
+          .\bootstrap-vcpkg.bat -disableMetrics
           Write-Output "::endgroup::"
-          break install_loop 
         }
-      } catch {
-        Write-Output "::warning::Attempt failed: $_"
-      }
-      Write-Output "::endgroup::"
-      $retryCount++
-      Start-Sleep -Seconds (30 * $retryCount)
-    }
-    
-    if ($retryCount -eq $maxRetries) {
-      # 输出详细错误日志
-      Get-Content "$env:VCPKG_ROOT\buildtrees\**\install-*.log" | Out-String
-      Write-Output "::error::Failed to install: $packages"
-      exit 1
-    }
+        & "$env:VCPKG_ROOT/vcpkg" version
+
+    # 5. 安装依赖库（自动重试机制）
+    - name: "🧩 Install Dependencies"
+      shell: powershell
+      run: |
+        $maxRetries = 3
+        $packages = @("libvpx[core]", "libyuv[core]", "openssl[core]")
+        
+        foreach ($pkg in $packages) {
+          $attempt = 0
+          while ($attempt -lt $maxRetries) {
+            try {
+              Write-Output "::group::Installing $pkg (Attempt $($attempt+1))"
+              & "$env:VCPKG_ROOT/vcpkg" install $pkg `
+                --triplet=x64-windows `
+                --clean-after-build `
+                --recurse `
+                --debug
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Output "::endgroup::"
+                break
+              }
+            } catch {
+              Write-Output "::warning::Install failed: $_"
+            }
+            Write-Output "::endgroup::"
+            $attempt++
+            if ($attempt -lt $maxRetries) {
+              Start-Sleep -Seconds (30 * $attempt)
+            }
+          }
+          
+          if ($attempt -eq $maxRetries) {
+            Write-Output "::error::Failed to install $pkg after $maxRetries attempts"
+            exit 1
+          }
+        }
+
+    # 6. 构建项目（带详细日志）
+    - name: "🔨 Build Release"
+      shell: powershell
+      run: |
+        $env:Path += ";$env:VCPKG_ROOT/installed/x64-windows/bin"
+        cargo build --release `
+          --target x86_64-pc-windows-msvc `
+          --verbose `
+          2>&1 | Tee-Object -FilePath build.log
+        
+        if (-not (Test-Path "target/release/rustdesk.exe")) {
+          Write-Output "::error::Build failed! Last 50 lines:"
+          Get-Content build.log -Tail 50 | ForEach-Object { Write-Output $_ }
+          exit 1
+        }
+
+    # 7. 收集构建产物（可选）
+    - name: "📦 Package Artifacts"
+      if: success()
+      uses: actions/upload-artifact@v3
+      with:
+        name: rustdesk-binaries
+        path: |
+          target/release/rustdesk.exe
+          target/release/*.dll
