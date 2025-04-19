@@ -13,7 +13,7 @@ on:
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   BUILD_DIR: "C:\\build_output"
-  RUST_BACKTRACE: "full"  # 启用完整错误回溯
+  WORKSPACE: "${{ github.workspace }}"  # 关键修复：显式声明工作目录
 
 jobs:
   build:
@@ -21,20 +21,30 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: "1️⃣ Initialize Environment"
+    - name: "1️⃣ Checkout Repository"
+      uses: actions/checkout@v4
+      with:
+        path: src  # 明确指定检出目录
+        submodules: recursive
+
+    - name: "2️⃣ Initialize Environment"
       shell: powershell
       run: |
-        # 设置UTF-8编码环境
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        $env:Path += ";$env:VCPKG_ROOT"
+        # 设置工作目录（关键修复）
+        $env:WORKSPACE = "$pwd\src"
+        cd $env:WORKSPACE
         
-        # 清理工作目录
-        if (Test-Path "$env:BUILD_DIR") {
-          Remove-Item -Recurse -Force "$env:BUILD_DIR"
+        # 验证源码结构
+        if (-not (Test-Path "Cargo.toml")) {
+          Write-Output "::error::Cargo.toml not found in $pwd"
+          Get-ChildItem -Recurse
+          exit 1
         }
+        
+        # 设置构建环境
         New-Item -ItemType Directory -Path "$env:BUILD_DIR" -Force | Out-Null
 
-    - name: "2️⃣ Install vcpkg"
+    - name: "3️⃣ Install vcpkg"
       shell: powershell
       run: |
         if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
@@ -43,59 +53,37 @@ jobs:
         }
         echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
 
-    - name: "3️⃣ Install Dependencies"
+    - name: "4️⃣ Install Dependencies"
       shell: powershell
+      working-directory: ${{ env.WORKSPACE }}  # 确保在正确目录执行
       run: |
-        try {
-          & "$env:VCPKG_ROOT\vcpkg" install @(
-            "libvpx",
-            "libyuv",
-            "openssl"
-          ) --triplet x64-windows --clean-after-build
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Dependency installation failed"
-            exit 1
-          }
-        } catch {
-          Write-Output "::error::$_"
-          exit 1
-        }
+        & "$env:VCPKG_ROOT\vcpkg" install @(
+          "libvpx",
+          "libyuv",
+          "openssl"
+        ) --triplet x64-windows --clean-after-build
 
-    - name: "4️⃣ Build Project (Safe Mode)"
+    - name: "5️⃣ Build Project"
       shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
       run: |
         $ErrorActionPreference = "Stop"
         $buildType = "${{ inputs.build_type }}"
+        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
         
-        try {
-          # 设置构建目录
-          $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
-          
-          # 首次构建尝试
-          cargo build --$buildType --target x86_64-pc-windows-msvc -v
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::warning::First build attempt failed, retrying..."
-            cargo clean
-            cargo build --$buildType --target x86_64-pc-windows-msvc -v
-          }
-          
-          # 验证输出文件
-          $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
-          if (-not (Test-Path $exePath)) {
-            Write-Output "::error::Executable not found at $exePath"
-            Get-ChildItem -Recurse "$env:BUILD_DIR"
-            exit 1
-          }
-          
-          echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
-        } catch {
-          Write-Output "::error::Build failed: $_"
+        # 首次构建
+        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+        
+        # 验证输出
+        $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+          Write-Output "::error::Build failed - Missing output file"
+          Get-ChildItem -Recurse "$env:BUILD_DIR"
           exit 1
         }
+        echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
-    - name: "5️⃣ Upload Artifacts"
+    - name: "6️⃣ Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
