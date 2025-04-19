@@ -1,20 +1,97 @@
-- name: 最终验证
-  shell: powershell
-  run: |
-    # 限制递归深度并忽略错误
-    Get-ChildItem C:\nasm -Depth 2 -ErrorAction SilentlyContinue
-    
-    # 精准检查 nasm.exe 的存在性
-    if (-not (Test-Path "C:\nasm\nasm.exe")) {
-      Write-Output "::error::NASM 安装失败"
-      exit 1
-    }
-    
-    # 选择性路径输出
-    $safePaths = @('C:\nasm', 'C:\nasm\bin')
-    $safePaths | ForEach-Object {
-      if (Test-Path $_) {
-        Write-Output "检查目录 $_"
-        Get-ChildItem $_ -File
-      }
-    }
+name: Rust Build with Manual Trigger
+
+on:
+  # 手动触发配置
+  workflow_dispatch:
+    inputs:
+      build-type:
+        description: '选择构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options: 
+          - debug
+          - release
+      architecture:
+        description: '目标架构'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x86
+          - x64
+      clean-build:
+        description: '是否清除缓存'
+        type: boolean
+        default: false
+      test-mode:
+        description: '启用测试模式'
+        type: boolean
+        default: false
+
+  # 自动触发配置（可选）
+  push:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: stable
+  TARGET_DIR: target/${{ github.event.inputs.build-type }}
+
+jobs:
+  build:
+    name: Build Project
+    runs-on: windows-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust 🦀
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: ${{ env.RUST_VERSION }}
+        components: rustfmt, clippy
+        override: true
+
+    - name: Cache Dependencies 📦
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ env.TARGET_DIR }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Clean Cache 🔥
+      if: ${{ github.event.inputs.clean-build }}
+      run: cargo clean
+
+    - name: Build Project 🛠️
+      run: |
+        cargo build \
+          --${{ github.event.inputs.build-type }} \
+          --target ${{ github.event.inputs.architecture }}-pc-windows-msvc
+        
+        if [ -f "${{ env.TARGET_DIR }}/your-app.exe" ]; then
+          echo "::notice::Build succeeded!"
+        else
+          echo "::error::Executable file not found!"
+          exit 1
+        fi
+
+    - name: Upload Artifacts 📤
+      if: success()
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-output
+        path: ${{ env.TARGET_DIR }}/your-app.exe
+
+  test:
+    name: Run Tests
+    needs: build
+    if: ${{ github.event.inputs.test-mode }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: cargo test --verbose
