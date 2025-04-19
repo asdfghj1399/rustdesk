@@ -25,7 +25,7 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Setup Flutter (Fixed)
+    - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
         channel: stable
@@ -40,29 +40,38 @@ jobs:
         override: true
         components: rustfmt
 
-    - name: Install system dependencies
+    - name: Install system dependencies (Fixed)
       shell: powershell
       run: |
         Set-ExecutionPolicy Bypass -Scope Process -Force
         $ProgressPreference = 'SilentlyContinue'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-        # 修复LLVM安装
+        # 安装 Chocolatey
+        if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
+            iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex
+        }
+        $env:PATH += ";$env:ProgramData\chocolatey\bin"
+
+        # 安装 Python (使用官方安装包)
+        $pythonInstaller = "python-$env:PYTHON_VERSION-amd64.exe"
+        Invoke-WebRequest "https://www.python.org/ftp/python/$env:PYTHON_VERSION/$pythonInstaller" -OutFile $pythonInstaller
+        Start-Process $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
+        Remove-Item $pythonInstaller
+
+        # 安装 LLVM (强制指定版本)
         choco install -y llvm --version=$env:LLVM_VERSION --force --allow-downgrade
 
-        # 使用winget安装Python
-        winget install -e --id Python.Python.3.9 --version $env:PYTHON_VERSION
-
-        # 多源NASM安装方案
+        # 安装 NASM (多源下载方案)
         $nasmUrls = @(
             "https://github.com/ShiftMediaProject/nasm/releases/download/nasm-$env:NASM_VERSION-1/win64-nasm.zip",
-            "https://sourceforge.net/projects/nasm.mirror/files/win64/$env:NASM_VERSION/nasm-$env:NASM_VERSION-win64.zip"
+            "https://github.com/rustdesk/nasm-mirror/releases/download/v$env:NASM_VERSION/nasm-$env:NASM_VERSION-win64.zip"
         )
 
         $nasmInstalled = $false
         foreach ($url in $nasmUrls) {
             try {
-                Write-Output "尝试从 $url 下载NASM..."
+                Write-Output "Attempting to download NASM from $url"
                 Invoke-WebRequest -Uri $url -OutFile "nasm.zip" -TimeoutSec 30
                 Expand-Archive -Path "nasm.zip" -DestinationPath "C:\nasm" -Force
                 if (Test-Path "C:\nasm\nasm.exe") {
@@ -71,28 +80,32 @@ jobs:
                     break
                 }
             } catch {
-                Write-Output "下载失败: $($_.Exception.Message)"
+                Write-Output "Download failed: $($_.Exception.Message)"
             }
         }
 
         if (-not $nasmInstalled) {
-            # 备用方案：使用系统自带NASM
-            if (Test-Path "C:\Program Files\NASM\nasm.exe") {
-                $env:PATH += ";C:\Program Files\NASM"
-            } elseif (Test-Path "$env:WINDIR\System32\nasm.exe") {
-                Write-Output "使用系统自带的NASM"
-            } else {
-                throw "NASM安装失败"
-            }
+            throw "Failed to install NASM from all sources"
         }
 
         # 验证环境
         python --version
+        pip --version
         nasm --version
-        llvm-config --version
+        clang --version
 
-    - name: Build Project
+    - name: Build project
       shell: powershell
       run: |
         # 添加具体构建命令
-        echo "开始构建流程..."
+        echo "Starting build process..."
+        cd rust
+        cargo build --release --features hwcodec,vram,flutter
+        Copy-Item "target/release/rustdesk.exe" -Destination "../flutter/build/windows/x64/runner/Release" -Force
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-windows
+        path: flutter/build/windows/x64/runner/Release/rustdesk.exe
+        retention-days: 7
