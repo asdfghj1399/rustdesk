@@ -8,7 +8,9 @@ on:
     branches: [ main ]
 
 env:
-  RUST_VERSION: "1.75.0"  # 明确指定稳定版本
+  RUST_VERSION: "1.75.0"
+  VERSION: "1.3.9"
+  BUILD_DIR: "flutter/build/windows/x64/runner/Release"
 
 jobs:
   build:
@@ -21,7 +23,7 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Install Rust (Fixed)
+    - name: Install Rust
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
@@ -30,7 +32,60 @@ jobs:
         override: true
         components: rustfmt
 
-    - name: Verify Rust installation
-      run: rustc --version
+    - name: Install dependencies
+      shell: powershell
+      run: |
+        choco install -y cmake git python llvm nasm
+        python -m pip install --upgrade pip
 
-    # 后续步骤保持不变...
+    - name: Build RustDesk
+      shell: powershell
+      run: |
+        # 确保构建目录存在
+        if (-not (Test-Path "build")) {
+            mkdir build
+        }
+        cd build
+        
+        # 生成构建系统
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        
+        # 开始构建
+        cmake --build . --config Release --target rustdesk -j 2
+
+    - name: Verify build output
+      shell: powershell
+      run: |
+        $exePath = "$env:GITHUB_WORKSPACE/$env:BUILD_DIR/rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+            throw "Build failed - rustdesk.exe not found at $exePath"
+        }
+        Write-Output "Build successful! Executable size: $( (Get-Item $exePath).Length / 1MB ) MB"
+
+    - name: Package artifacts
+      shell: powershell
+      run: |
+        # 创建发布包
+        $artifactDir = "release_$env:VERSION"
+        mkdir $artifactDir
+        
+        # 复制主程序
+        Copy-Item "$env:BUILD_DIR/rustdesk.exe" -Destination $artifactDir
+        
+        # 复制依赖文件
+        $dlls = Get-ChildItem "$env:BUILD_DIR" -Filter *.dll
+        foreach ($dll in $dlls) {
+            Copy-Item $dll.FullName -Destination $artifactDir
+        }
+        
+        # 创建ZIP包
+        Compress-Archive -Path "$artifactDir/*" -DestinationPath "rustdesk-$env:VERSION.zip" -Force
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-windows
+        path: |
+          rustdesk-$env:VERSION.zip
+          ${{ env.BUILD_DIR }}/rustdesk.exe
+        retention-days: 7
