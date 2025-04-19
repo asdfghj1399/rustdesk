@@ -1,4 +1,4 @@
-name: "🛠️ RustDesk Windows Build (Stable)"
+name: "🚀 RustDesk Windows Build (Stable)"
 
 on:
   workflow_dispatch:
@@ -9,15 +9,11 @@ on:
         default: "release"
         type: choice
         options: ["release", "debug"]
-      clean_build:
-        description: "Perform full clean before build"
-        type: boolean
-        default: false
 
 env:
-  SYSTEMROOT: "C:\\Windows"  # 确保系统路径正确
   VCPKG_ROOT: "C:\\vcpkg"
   BUILD_DIR: "C:\\build_output"
+  RUST_BACKTRACE: "full"  # 启用完整错误回溯
 
 jobs:
   build:
@@ -25,58 +21,86 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: "1. Setup Environment"
+    - name: "1️⃣ Initialize Environment"
       shell: powershell
       run: |
-        # 替代chcp的编码设置方案
-        $OutputEncoding = [System.Text.Encoding]::UTF8
+        # 设置UTF-8编码环境
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-        # 清理环境
-        if (${{ inputs.clean_build }}) {
-          Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "$env:BUILD_DIR" -ErrorAction SilentlyContinue
+        $env:Path += ";$env:VCPKG_ROOT"
+        
+        # 清理工作目录
+        if (Test-Path "$env:BUILD_DIR") {
+          Remove-Item -Recurse -Force "$env:BUILD_DIR"
         }
+        New-Item -ItemType Directory -Path "$env:BUILD_DIR" -Force | Out-Null
 
-    - name: "2. Install vcpkg"
+    - name: "2️⃣ Install vcpkg"
       shell: powershell
       run: |
         if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
         }
-        echo "$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_PATH -Append
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
 
-    - name: "3. Install Dependencies"
+    - name: "3️⃣ Install Dependencies"
       shell: powershell
       run: |
-        $installArgs = @(
-          "install",
-          "libvpx",
-          "libyuv", 
-          "openssl",
-          "--triplet", "x64-windows",
-          "--clean-after-build"
-        )
-        & "$env:VCPKG_ROOT\vcpkg" @installArgs
-
-    - name: "4. Build Project"
-      shell: powershell
-      run: |
-        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
-        cargo build --${{ inputs.build_type }} --target x86_64-pc-windows-msvc
-        
-        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\${{ inputs.build_type }}\rustdesk.exe")) {
-          Write-Error "Build failed - EXE not found"
-          Get-ChildItem -Recurse "$env:BUILD_DIR"
+        try {
+          & "$env:VCPKG_ROOT\vcpkg" install @(
+            "libvpx",
+            "libyuv",
+            "openssl"
+          ) --triplet x64-windows --clean-after-build
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Dependency installation failed"
+            exit 1
+          }
+        } catch {
+          Write-Output "::error::$_"
           exit 1
         }
 
-    - name: "5. Upload Artifacts"
+    - name: "4️⃣ Build Project (Safe Mode)"
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        $buildType = "${{ inputs.build_type }}"
+        
+        try {
+          # 设置构建目录
+          $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
+          
+          # 首次构建尝试
+          cargo build --$buildType --target x86_64-pc-windows-msvc -v
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::warning::First build attempt failed, retrying..."
+            cargo clean
+            cargo build --$buildType --target x86_64-pc-windows-msvc -v
+          }
+          
+          # 验证输出文件
+          $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
+          if (-not (Test-Path $exePath)) {
+            Write-Output "::error::Executable not found at $exePath"
+            Get-ChildItem -Recurse "$env:BUILD_DIR"
+            exit 1
+          }
+          
+          echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
+        } catch {
+          Write-Output "::error::Build failed: $_"
+          exit 1
+        }
+
+    - name: "5️⃣ Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
         path: |
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
+          ${{ env.EXE_PATH }}
           ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
         retention-days: 7
+        if-no-files-found: error
