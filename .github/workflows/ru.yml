@@ -1,0 +1,125 @@
+name: "RustDesk Windows CI (Stable)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_clean:
+        description: "Clean vcpkg cache"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"
+  # 禁用所有缓存机制
+  VCPKG_FEATURE_FLAGS: "-binarycaching,-manifests,-versions"  
+  VCPKG_BINARY_SOURCES: "clear"
+
+jobs:
+  build:name: "RustDesk Windows CI (Stable)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_install:
+        description: "Perform full clean install"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"
+  VCPKG_FEATURE_FLAGS: "-binarycaching,-manifests"  # 禁用所有缓存
+  VCPKG_BINARY_SOURCES: "clear"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Clean Install
+      if: ${{ inputs.clean_install }}
+      run: rm -rf "${{ env.VCPKG_ROOT }}"
+
+    - name: Install Dependencies
+      run: |
+        vcpkg install \
+          --triplet x64-windows \
+          --clean-after-build \
+          --recurse \
+          --x-asset-sources=clear \
+          libvpx libyuv openssl
+
+    - name: Build
+      run: cargo build --release --target x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 75  # 延长超时时间
+
+    steps:
+    - name: "1️⃣ Nuclear Clean"
+      if: ${{ inputs.force_clean }}
+      shell: powershell
+      run: |
+        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
+
+    - name: "2️⃣ Checkout (Deep Clone)"
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0  # 完整克隆历史
+
+    - name: "3️⃣ Safe vcpkg Setup"
+      shell: powershell
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          # 锁定已知稳定版本
+          git checkout 2024.04.17  
+          .\bootstrap-vcpkg.bat -disableMetrics
+        }
+
+    - name: "4️⃣ Bulletproof Dependency Install"
+      shell: powershell
+      run: |
+        $retryCount = 0
+        $maxRetries = 3
+        
+        :install_loop while ($retryCount -lt $maxRetries) {
+          try {
+            & "$env:VCPKG_ROOT\vcpkg" install @(
+              "libvpx[core]",
+              "libyuv[core]",
+              "openssl[core]"
+            ) --triplet x64-windows `
+              --clean-after-build `
+              --recurse `
+              --x-asset-sources=clear
+            
+            if ($LASTEXITCODE -eq 0) { break install_loop }
+          } catch {
+            Write-Output "::warning::Attempt $($retryCount+1) failed"
+          }
+          $retryCount++
+          Start-Sleep -Seconds (30 * $retryCount)
+        }
+        
+        if ($retryCount -eq $maxRetries) {
+          Write-Output "::error::All installation attempts failed"
+          exit 1
+        }
+
+    - name: "5️⃣ Build with Diagnostics"
+      shell: powershell
+      run: |
+        cargo build --release `
+          --target x86_64-pc-windows-msvc `
+          -vv --message-format=json 2>&1 | Tee-Object -FilePath build.log
+        
+        if (-not (Test-Path "target\\release\\rustdesk.exe")) {
+          Write-Output "::error::Build failed - Last errors:"
+          Get-Content build.log | Select-String -Pattern "error:" -Context 5
+          exit 1
+        }
