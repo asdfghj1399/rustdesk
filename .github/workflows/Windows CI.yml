@@ -1,4 +1,4 @@
-name: "🚀 RustDesk Windows Build (Stable)"
+name: "🚀 RustDesk Windows Build (Verified)"
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   BUILD_DIR: "C:\\build_output"
-  WORKSPACE: "${{ github.workspace }}"  # 关键修复：显式声明工作目录
+  WORKSPACE: "${{ github.workspace }}\\rustdesk"  # 明确项目子目录
 
 jobs:
   build:
@@ -21,41 +21,53 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: "1️⃣ Checkout Repository"
+    - name: "1️⃣ Checkout Repository (Full Depth)"
       uses: actions/checkout@v4
       with:
-        path: src  # 明确指定检出目录
+        path: rustdesk  # 明确检出到子目录
         submodules: recursive
+        fetch-depth: 0  # 获取完整历史
 
-    - name: "2️⃣ Initialize Environment"
+    - name: "2️⃣ Validate Project Structure"
       shell: powershell
       run: |
-        # 设置工作目录（关键修复）
-        $env:WORKSPACE = "$pwd\src"
-        cd $env:WORKSPACE
-        
-        # 验证源码结构
-        if (-not (Test-Path "Cargo.toml")) {
-          Write-Output "::error::Cargo.toml not found in $pwd"
-          Get-ChildItem -Recurse
-          exit 1
+        # 严格验证项目结构
+        $requiredFiles = @("Cargo.toml", "src/main.rs")
+        foreach ($file in $requiredFiles) {
+          if (-not (Test-Path "$env:WORKSPACE\$file")) {
+            Write-Output "::error::Missing required file: $file"
+            Get-ChildItem -Recurse "$env:WORKSPACE"
+            exit 1
+          }
         }
-        
-        # 设置构建环境
+        echo "PROJECT_VALIDATED=true" >> $env:GITHUB_ENV
+
+    - name: "3️⃣ Setup Build Environment"
+      shell: powershell
+      run: |
+        # 初始化构建目录
         New-Item -ItemType Directory -Path "$env:BUILD_DIR" -Force | Out-Null
-
-    - name: "3️⃣ Install vcpkg"
-      shell: powershell
-      run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        
+        # 安装vcpkg（带重试）
+        $maxRetries = 3
+        $retryCount = 0
+        while ($retryCount -lt $maxRetries) {
+          try {
+            if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+              git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+              & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+            }
+            break
+          } catch {
+            $retryCount++
+            if ($retryCount -eq $maxRetries) { throw }
+            Start-Sleep -Seconds 10
+          }
         }
-        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
 
     - name: "4️⃣ Install Dependencies"
       shell: powershell
-      working-directory: ${{ env.WORKSPACE }}  # 确保在正确目录执行
+      working-directory: ${{ env.WORKSPACE }}
       run: |
         & "$env:VCPKG_ROOT\vcpkg" install @(
           "libvpx",
@@ -67,28 +79,25 @@ jobs:
       shell: powershell
       working-directory: ${{ env.WORKSPACE }}
       run: |
-        $ErrorActionPreference = "Stop"
-        $buildType = "${{ inputs.build_type }}"
         $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
         
-        # 首次构建
-        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+        # 带诊断信息的构建
+        cargo build --${{ inputs.build_type }} `
+          --target x86_64-pc-windows-msvc `
+          -v --message-format=json | Tee-Object -FilePath build_log.json
         
-        # 验证输出
-        $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-          Write-Output "::error::Build failed - Missing output file"
-          Get-ChildItem -Recurse "$env:BUILD_DIR"
+        # 解析构建日志验证结果
+        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\${{ inputs.build_type }}\rustdesk.exe")) {
+          Write-Output "::error::Build Failed - Diagnostics:"
+          Get-Content build_log.json | Where-Object { $_ -match '"reason":"compiler-message"' }
           exit 1
         }
-        echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
     - name: "6️⃣ Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
         path: |
-          ${{ env.EXE_PATH }}
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
           ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
         retention-days: 7
-        if-no-files-found: error
