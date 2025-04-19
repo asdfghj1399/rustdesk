@@ -1,24 +1,23 @@
-name: "🛠️ RustDesk Manual Build (Fixed Encoding Issues)"
+name: "🛠️ RustDesk Windows Build (Stable)"
 
 on:
   workflow_dispatch:
     inputs:
-      build_type:  # 构建类型
-        description: "Select build mode"
+      build_type:
+        description: "Select build configuration"
         required: true
+        default: "release"
         type: choice
         options: ["release", "debug"]
-        default: "release"
-      clean_cache:  # 强制清理
-        description: "Force clean cache (fix encoding issues)"
+      clean_build:
+        description: "Perform full clean before build"
         type: boolean
         default: false
 
 env:
-  # 中文环境保障
-  LC_ALL: "zh_CN.UTF-8"
-  VCPKG_ROOT: "C:\\vcpkg_build"
-  BUILD_DIR: "C:\\rustdesk_output"  # Fixed English output path
+  SYSTEMROOT: "C:\\Windows"  # 确保系统路径正确
+  VCPKG_ROOT: "C:\\vcpkg"
+  BUILD_DIR: "C:\\build_output"
 
 jobs:
   build:
@@ -26,54 +25,58 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: "1. Environment Cleanup"  # 环境净化
-      if: ${{ inputs.clean_cache }}
-      shell: cmd
+    - name: "1. Setup Environment"
+      shell: powershell
       run: |
-        chcp 65001 >nul
-        rd /s/q "%VCPKG_ROOT%" 2>nul
-        rd /s/q "%BUILD_DIR%" 2>nul
-        rd /s/q target 2>nul
+        # 替代chcp的编码设置方案
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-    - name: "2. Initialize vcpkg"  # 初始化vcpkg
-      shell: cmd
+        # 清理环境
+        if (${{ inputs.clean_build }}) {
+          Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:BUILD_DIR" -ErrorAction SilentlyContinue
+        }
+
+    - name: "2. Install vcpkg"
+      shell: powershell
       run: |
-        chcp 65001 >nul
-        if not exist "%VCPKG_ROOT%\\vcpkg.exe" (
-          git clone https://github.com/microsoft/vcpkg "%VCPKG_ROOT%"
-          cd "%VCPKG_ROOT%"
-          bootstrap-vcpkg.bat -disableMetrics
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        }
+        echo "$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+    - name: "3. Install Dependencies"
+      shell: powershell
+      run: |
+        $installArgs = @(
+          "install",
+          "libvpx",
+          "libyuv", 
+          "openssl",
+          "--triplet", "x64-windows",
+          "--clean-after-build"
         )
-        setx PATH "%PATH%;%VCPKG_ROOT%"
+        & "$env:VCPKG_ROOT\vcpkg" @installArgs
 
-    - name: "3. Install Dependencies (Safe Mode)"  # 安装依赖（安全模式）
-      shell: cmd
+    - name: "4. Build Project"
+      shell: powershell
       run: |
-        cd "%VCPKG_ROOT%"
-        vcpkg install --triplet x64-windows ^
-          --clean-after-build ^
-          --recurse ^
-          libvpx libyuv openssl
-
-    - name: "4. Safe Build"  # 安全构建
-      shell: cmd
-      run: |
-        set CARGO_TARGET_DIR=%BUILD_DIR%
-        cargo build --%{{ inputs.build_type }}% ^
-          --target x86_64-pc-windows-msvc ^
-          --config "build.rustflags=['-C', 'target-feature=+crt-static']"
+        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
+        cargo build --${{ inputs.build_type }} --target x86_64-pc-windows-msvc
         
-        if not exist "%BUILD_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.build_type }}%\\rustdesk.exe" (
-          echo ::error::Build failed: No output file detected
-          dir /s "%BUILD_DIR%"
+        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\${{ inputs.build_type }}\rustdesk.exe")) {
+          Write-Error "Build failed - EXE not found"
+          Get-ChildItem -Recurse "$env:BUILD_DIR"
           exit 1
-        )
+        }
 
-    - name: "5. Package Artifacts"  # 打包成品
+    - name: "5. Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
-        name: RustDesk_%{{ inputs.build_type }}%_%{{ github.run_number }}
+        name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
         path: |
-          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.build_type }}%/rustdesk.exe
-          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.build_type }}%/*.dll
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
         retention-days: 7
