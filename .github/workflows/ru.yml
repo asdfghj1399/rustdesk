@@ -1,51 +1,97 @@
-name: RustDesk CI (编码修复版)
+name: RustDesk CI/CD (全功能版)
+
+on:
+  # 手动触发配置
+  workflow_dispatch:
+    inputs:
+      build-mode:
+        description: '选择构建模式'
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+        default: 'release'
+      clean-cache:
+        description: '清除构建缓存'
+        type: boolean
+        default: false
+
+  # 自动触发配置
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  debug-path:
+  setup:
+    name: 环境初始化
     runs-on: windows-latest
     steps:
-    - name: Checkout Code
+    - name: 检出代码及子模块
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        
-    - name: Path Debugging
+        path: src
+
+    - name: 修复子模块路径
       shell: powershell
-      env:
-        PS_ENCODING: utf-8  # 显式声明编码
       run: |
-        # 设置控制台编码
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        chcp 65001
-
-        # 使用纯ASCII字符显示路径
-        $hbbPath = "$env:GITHUB_WORKSPACE\libs\hbb_common"
-        Write-Output "##[group]🔍 Path Verification"
-        Write-Output "Calculated Path (ASCII): $hbbPath"
-
-        # 安全路径转换
-        $normalizedPath = $hbbPath -replace '\\{2,}', '\' -replace '/', '\'
-        Write-Output "Normalized Path: $normalizedPath"
-
-        # 缓冲模式路径检测
-        try {
-            Set-Location $normalizedPath -ErrorAction Stop
-            Write-Output "##[info]✅ Successfully accessed: $(Get-Location)"
-        } catch {
-            Write-Output "::error::❌ Path access failed! Diagnostics below..."
-            Get-ChildItem "$env:GITHUB_WORKSPACE\libs" -Recurse | Format-Table FullName
+        # 强制重置子模块
+        git submodule deinit -f .
+        git submodule update --init --recursive --force
+        
+        # 路径标准化处理
+        $hbbPath = "$env:GITHUB_WORKSPACE\src\libs\hbb_common" -replace '/', '\'
+        if (-not (Test-Path $hbbPath)) {
+            Write-Output "::error::关键路径缺失: $hbbPath"
+            Get-ChildItem "$env:GITHUB_WORKSPACE\src\libs" -Recurse
             exit 1
         }
 
-        # 附加诊断信息
-        Write-Output "##[debug]Directory contents:"
-        Get-ChildItem | Format-Table Name, Length, LastWriteTime
-        Write-Output "##[endgroup]"
-        
-    - name: Build Verification
-      shell: pwsh  # 使用PowerShell Core
+  build:
+    name: 项目构建
+    needs: setup
+    runs-on: windows-latest
+    steps:
+    - name: 设置构建环境
+      shell: powershell
       run: |
-        # UTF-8 BOM 显式声明
-        $OutputEncoding = [System.Text.Encoding]::UTF8
-        Write-Output "构建路径验证..."
-        cargo metadata --manifest-path "$env:GITHUB_WORKSPACE\libs\hbb_common\Cargo.toml" --format-version 1 --verbose
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        chcp 65001
+        $env:Path += ";C:\Program Files\LLVM\bin"
+
+    - name: 清理工作区
+      if: ${{ inputs.clean-cache }}
+      run: |
+        Remove-Item -Recurse "$env:GITHUB_WORKSPACE\src\target" -ErrorAction SilentlyContinue
+        cargo clean
+
+    - name: 构建项目
+      run: |
+        cargo build --${{ inputs.build-mode }} --manifest-path ./src/libs/hbb_common/Cargo.toml
+        cargo build --${{ inputs.build-mode }} --bin rustdesk
+
+    - name: 上传产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-bin
+        path: |
+          src/target/${{ inputs.build-mode }}/rustdesk.exe
+          src/target/${{ inputs.build-mode }}/*.dll
+        retention-days: 7
+
+  post-build:
+    name: 清理报告
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 生成构建报告
+        shell: bash
+        run: |
+          echo "##[group]构建摘要"
+          echo "构建模式: ${{ inputs.build-mode }}"
+          echo "是否清理缓存: ${{ inputs.clean-cache }}"
+          echo "触发时间: $(date +'%Y-%m-%d %H:%M:%S')"
+          echo "##[endgroup]"
