@@ -1,10 +1,10 @@
-name: "1️⃣ RustDesk Windows Build (Final Fixed)"
+name: "1️⃣ RustDesk Windows Build (Stable)"
 
 on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: "Build Configuration"
+        description: "Build Type"
         required: true
         default: "release"
         type: choice
@@ -12,86 +12,116 @@ on:
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_DISABLE_METRICS: "true"
+  RUST_BACKTRACE: "full"  # 启用完整错误回溯
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90  # 延长超时时间
 
     steps:
     - name: "1️⃣ Checkout code"
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        fetch-depth: 0  # 获取完整提交历史
 
-    - name: "2️⃣ Setup vcpkg (With Custom Ports)"
+    - name: "2️⃣ Setup vcpkg (Minimal)"
       shell: pwsh
       run: |
-        # 清理并初始化vcpkg
-        if (Test-Path "$env:VCPKG_ROOT") {
-          Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        # 最小化vcpkg安装
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          .\bootstrap-vcpkg.bat -disableMetrics
         }
-        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-        cd "$env:VCPKG_ROOT"
-        
-        # 添加自定义hwcodec端口
-        $hwcodecPort = @"
-        {
-          "name": "hwcodec",
-          "version-string": "1.0",
-          "port-version": 1,
-          "description": "Hardware accelerated codecs",
-          "homepage": "https://github.com/rustdesk/hwcodec",
-          "dependencies": ["libyuv", "libvpx"]
-        }
-        "@
-        New-Item -ItemType Directory -Path "$env:VCPKG_ROOT\ports\hwcodec"
-        $hwcodecPort | Out-File -FilePath "$env:VCPKG_ROOT\ports\hwcodec\vcpkg.json"
-        
-        .\bootstrap-vcpkg.bat -disableMetrics
         echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
 
-    - name: "3️⃣ Install Dependencies"
+    - name: "3️⃣ Install Core Dependencies"
       shell: pwsh
       run: |
         cd "$env:VCPKG_ROOT"
-        
-        # 基础依赖
         .\vcpkg install @(
           "libvpx[core]",
           "libyuv[core]",
           "openssl[core]"
         ) --triplet x64-windows --clean-after-build
-        
-        # 特殊处理hwcodec
-        if (-not (Test-Path "$env:VCPKG_ROOT\installed\x64-windows\include\hwcodec")) {
-          Write-Output "::warning::hwcodec not found, using software fallback"
-          echo "CARGO_FEATURES=--no-default-features" >> $env:GITHUB_ENV
-        }
 
-    - name: "4️⃣ Build RustDesk"
+    - name: "4️⃣ Build RustDesk (Debuggable)"
       shell: pwsh
       run: |
+        # 环境检查
+        echo "=== Build Environment ==="
+        cargo --version
+        rustc --version
+        vcpkg list
+        
+        # 增量构建（首次失败后重试使用）
         $buildType = "${{ inputs.build_type }}"
-        $features = if ($env:CARGO_FEATURES) { $env:CARGO_FEATURES } else { "" }
+        $buildCmd = "cargo build --$buildType --target x86_64-pc-windows-msvc -v"
         
-        cargo build --$buildType --target x86_64-pc-windows-msvc $features -v
-        
+        # 首次尝试
+        echo "=== First Attempt ==="
+        Invoke-Expression $buildCmd
+        if ($LASTEXITCODE -ne 0) {
+          # 失败后清理并重试
+          echo "::warning::First build failed, cleaning and retrying..."
+          cargo clean
+          Remove-Item -Recurse -Force target\ -ErrorAction SilentlyContinue
+          
+          echo "=== Second Attempt ==="
+          Invoke-Expression $buildCmd
+          if ($LASTEXITCODE -ne 0) {
+            # 最终失败处理
+            echo "::error::Build failed after retry"
+            echo "=== Dependency Tree ==="
+            cargo tree
+            echo "=== Target Directory ==="
+            Get-ChildItem -Recurse target\
+            exit 1
+          }
+        }
+
+        # 验证输出
         $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
         if (-not (Test-Path $exePath)) {
-          Write-Output "::error::Build failed - Missing EXE"
+          echo "::error::EXE not found at expected path"
           Get-ChildItem -Recurse target\
           exit 1
         }
         echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
-    - name: "5️⃣ Upload Artifact"
+    - name: "5️⃣ Collect Build Artifacts"
+      shell: pwsh
+      run: |
+        # 收集所有可能需要的文件
+        $buildType = "${{ inputs.build_type }}"
+        $artifactDir = "artifacts_$buildType"
+        
+        New-Item -ItemType Directory -Path $artifactDir -Force
+        Copy-Item "${{ env.EXE_PATH }}" $artifactDir
+        Copy-Item "target\x86_64-pc-windows-msvc\$buildType\*.dll" $artifactDir -ErrorAction SilentlyContinue
+        Copy-Item "target\x86_64-pc-windows-msvc\$buildType\*.pdb" $artifactDir -ErrorAction SilentlyContinue
+        
+        # 生成构建报告
+        $report = @"
+        === Build Report ===
+        Timestamp: $(Get-Date)
+        Build Type: $buildType
+        Executable: $($artifactDir)/$(Split-Path ${{ env.EXE_PATH }} -Leaf)
+        File Size: $((Get-Item ${{ env.EXE_PATH }}).Length / 1MB) MB
+        Dependencies:
+        $(Get-ChildItem $artifactDir | Select-Object Name,Length | Format-Table -AutoSize | Out-String)
+        "@
+        $report | Out-File "$artifactDir/build_report.txt"
+        
+        echo "ARTIFACT_DIR=$artifactDir" >> $env:GITHUB_ENV
+
+    - name: "6️⃣ Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: "rustdesk-${{ inputs.build_type }}-${{ github.run_id }}"
         path: |
-          ${{ env.EXE_PATH }}
-          target\x86_64-pc-windows-msvc\${{ inputs.build_type }}/*.dll
+          ${{ env.ARTIFACT_DIR }}/*
         retention-days: 7
         if-no-files-found: error
