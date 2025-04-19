@@ -9,9 +9,7 @@ on:
 
 env:
   RUST_VERSION: "1.75.0"
-  LLVM_VERSION: "15.0.7"  # 修正可用版本号
   NASM_VERSION: "2.16.01"
-  PYTHON_VERSION: "3.9.13"
 
 jobs:
   build:
@@ -27,63 +25,58 @@ jobs:
     - name: Install system dependencies
       shell: powershell
       run: |
+        $ErrorActionPreference = "Stop"
         Set-ExecutionPolicy Bypass -Scope Process -Force
         $ProgressPreference = 'SilentlyContinue'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-        # 安装 Chocolatey
-        if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
-            iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex
+        # 验证系统自带NASM
+        $systemNasm = $false
+        if (Test-Path "C:\Program Files\NASM\nasm.exe") {
+            $env:PATH += ";C:\Program Files\NASM"
+            $systemNasm = $true
+        } elseif (Test-Path "$env:WINDIR\System32\nasm.exe") {
+            $systemNasm = $true
         }
-        $env:PATH += ";$env:ProgramData\chocolatey\bin"
 
-        # 安装 Python
-        choco install -y python3 --version=$env:PYTHON_VERSION --no-progress
+        if (-not $systemNasm) {
+            # 多源下载方案（验证可用的下载源）
+            $nasmUrls = @(
+                "https://www.nasm.us/pub/nasm/stable/win64/nasm-${env:NASM_VERSION}-win64.zip",
+                "https://ftp.osuosl.org/pub/nasm/releasebuilds/${env:NASM_VERSION}/win64/nasm-${env:NASM_VERSION}-win64.zip"
+            )
 
-        # 安装 LLVM (使用官方预编译包)
-        $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/LLVM-$env:LLVM_VERSION-win64.exe"
-        Invoke-WebRequest -Uri $llvmUrl -OutFile llvm.exe
-        Start-Process .\llvm.exe -ArgumentList "/S" -Wait
-
-        # 安装 NASM (使用官方镜像)
-        $nasmUrls = @(
-            "https://www.nasm.us/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip",
-            "https://ftp.osuosl.org/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip"
-        )
-
-        $nasmInstalled = $false
-        foreach ($url in $nasmUrls) {
-            try {
-                Write-Output "从 $url 下载NASM..."
-                Invoke-WebRequest -Uri $url -OutFile nasm.zip -TimeoutSec 30
-                Expand-Archive -Path nasm.zip -DestinationPath C:\nasm -Force
-                if (Test-Path "C:\nasm\nasm.exe") {
-                    $env:PATH = "C:\nasm;$env:PATH"
-                    $nasmInstalled = $true
-                    break
+            foreach ($url in $nasmUrls) {
+                try {
+                    Write-Output "正在尝试从 $url 下载NASM..."
+                    Invoke-WebRequest -Uri $url -OutFile nasm.zip -TimeoutSec 30
+                    Expand-Archive -Path nasm.zip -DestinationPath C:\nasm -Force
+                    
+                    if (Test-Path "C:\nasm\nasm.exe") {
+                        $env:PATH = "C:\nasm;${env:PATH}"
+                        Write-Output "NASM安装成功"
+                        break
+                    }
+                } catch {
+                    Write-Output "下载失败: $($_.Exception.Message)"
                 }
-            } catch {
-                Write-Output "下载失败: $($_.Exception.Message)"
             }
         }
 
-        if (-not $nasmInstalled) {
-            # 使用系统自带NASM（GitHub Actions windows-latest镜像自带nasm）
-            if (Test-Path "C:\Program Files\NASM\nasm.exe") {
-                $env:PATH += ";C:\Program Files\NASM"
-            } else {
-                Write-Output "NASM version:"
-                nasm --version
-            }
+        # 最终验证NASM安装
+        try {
+            $nasmPath = (Get-Command nasm).Source
+            Write-Output "NASM路径: ${nasmPath}"
+            nasm --version
+        } catch {
+            throw "NASM安装失败，最后尝试路径: ${env:PATH}"
         }
 
-        # 验证环境
-        clang --version
-        nasm --version
-        python --version
-
-    - name: Build project
+    - name: Build verification
       shell: powershell
       run: |
-        # 具体构建命令
-        echo "开始构建流程..."
+        # 示例构建命令
+        echo "PATH环境变量:"
+        echo $env:PATH
+        echo "NASM版本信息:"
+        nasm --version
