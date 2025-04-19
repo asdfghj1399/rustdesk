@@ -9,9 +9,9 @@ on:
         default: false
 
 env:
-  VCPKG_ROOT: "${{ runner.temp }}/vcpkg"  # 使用临时目录避免权限问题
-  VCPKG_FEATURE_FLAGS: "-binarycaching"   # 禁用二进制缓存（确保源码编译）
-  RUST_BACKTRACE: "full"                  # 启用完整的Rust错误回溯
+  VCPKG_ROOT: "C:\\vcpkg"  # 改用固定路径（避免 runner.temp 问题）
+  VCPKG_FEATURE_FLAGS: "-binarycaching"   # 禁用二进制缓存
+  RUST_BACKTRACE: "full"   # 启用完整的Rust错误回溯
 
 jobs:
   build:
@@ -27,7 +27,7 @@ jobs:
         Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
 
-    # 2. 检出代码（包含子模块）
+    # 2. 检出代码
     - name: "📥 Checkout Repository"
       uses: actions/checkout@v4
       with:
@@ -43,7 +43,7 @@ jobs:
         targets: x86_64-pc-windows-msvc
         override: true
 
-    # 4. 安装vcpkg（锁定稳定版本）
+    # 4. 安装vcpkg
     - name: "📦 Install vcpkg"
       shell: powershell
       run: |
@@ -51,13 +51,13 @@ jobs:
           Write-Output "::group::Cloning vcpkg"
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
           cd "$env:VCPKG_ROOT"
-          git checkout 2024.04.17  # 锁定已知稳定版本
+          git checkout 2024.04.17
           .\bootstrap-vcpkg.bat -disableMetrics
           Write-Output "::endgroup::"
         }
         & "$env:VCPKG_ROOT/vcpkg" version
 
-    # 5. 安装依赖库（自动重试机制）
+    # 5. 安装依赖库（带重试机制）
     - name: "🧩 Install Dependencies"
       shell: powershell
       run: |
@@ -95,7 +95,7 @@ jobs:
           }
         }
 
-    # 6. 构建项目（带详细日志）
+    # 6. 构建项目
     - name: "🔨 Build Release"
       shell: powershell
       run: |
@@ -111,8 +111,8 @@ jobs:
           exit 1
         }
 
-    # 7. 收集构建产物（可选）
-    - name: "📦 Package Artifacts"
+    # 7. 上传产物（可选）
+    - name: "📦 Upload Artifacts"
       if: success()
       uses: actions/upload-artifact@v3
       with:
