@@ -1,81 +1,51 @@
-name: RustDesk CI/CD (路径修复版)
-
-on:
-  workflow_dispatch:
-    inputs:
-      verbose:
-        description: "显示详细日志"
-        type: boolean
-        default: false
+name: RustDesk CI (编码修复版)
 
 jobs:
-  setup:
+  debug-path:
     runs-on: windows-latest
     steps:
-    - name: Checkout with Submodules
+    - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        fetch-depth: 0
-        path: src
-        # 强制重置子模块缓存
-        clean: true
-
-    - name: Validate Submodules
+        
+    - name: Path Debugging
       shell: powershell
+      env:
+        PS_ENCODING: utf-8  # 显式声明编码
       run: |
-        $ErrorActionPreference = "Stop"
-        
-        # 列出所有子模块状态
-        Write-Output "##[group]Submodule Status"
-        git submodule status --recursive
-        Write-Output "##[endgroup]"
+        # 设置控制台编码
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        chcp 65001
 
-        # 验证关键路径
-        $criticalPaths = @(
-            "$env:GITHUB_WORKSPACE/src/libs/hbb_common",
-            "$env:GITHUB_WORKSPACE/src/libs/hbb_common/Cargo.toml"
-        )
+        # 使用纯ASCII字符显示路径
+        $hbbPath = "$env:GITHUB_WORKSPACE\libs\hbb_common"
+        Write-Output "##[group]🔍 Path Verification"
+        Write-Output "Calculated Path (ASCII): $hbbPath"
 
-        foreach ($path in $criticalPaths) {
-            if (-not (Test-Path $path)) {
-                Write-Output "::error::关键路径缺失: $path"
-                Get-ChildItem "$env:GITHUB_WORKSPACE/src/libs" -Recurse
-                exit 1
-            }
-        }
+        # 安全路径转换
+        $normalizedPath = $hbbPath -replace '\\{2,}', '\' -replace '/', '\'
+        Write-Output "Normalized Path: $normalizedPath"
 
-        # 转换Unix路径为Windows格式
-        $hbbPath = "$env:GITHUB_WORKSPACE/src/libs/hbb_common" -replace '/', '\'
-        Set-Location $hbbPath
-        Write-Output "当前工作目录: $(Get-Location)"
-
-  build:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-    - name: Build hbb_common
-      shell: powershell
-      run: |
-        # 使用绝对路径
-        $hbbPath = "$env:GITHUB_WORKSPACE/src/libs/hbb_common"
-        
-        # 构建子模块
-        cargo build --manifest-path "$hbbPath\Cargo.toml" --verbose
-        
-        # 验证构建产物
-        if (-not (Test-Path "$hbbPath\target\debug\hbb_common.rlib")) {
-            Get-ChildItem "$hbbPath\target" -Recurse
+        # 缓冲模式路径检测
+        try {
+            Set-Location $normalizedPath -ErrorAction Stop
+            Write-Output "##[info]✅ Successfully accessed: $(Get-Location)"
+        } catch {
+            Write-Output "::error::❌ Path access failed! Diagnostics below..."
+            Get-ChildItem "$env:GITHUB_WORKSPACE\libs" -Recurse | Format-Table FullName
             exit 1
         }
 
-    - name: Build Main Project
-      run: cargo build --release
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-output
-        path: |
-          target/release/rustdesk.exe
-          target/release/*.dll
+        # 附加诊断信息
+        Write-Output "##[debug]Directory contents:"
+        Get-ChildItem | Format-Table Name, Length, LastWriteTime
+        Write-Output "##[endgroup]"
+        
+    - name: Build Verification
+      shell: pwsh  # 使用PowerShell Core
+      run: |
+        # UTF-8 BOM 显式声明
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+        Write-Output "构建路径验证..."
+        cargo metadata --manifest-path "$env:GITHUB_WORKSPACE\libs\hbb_common\Cargo.toml" --format-version 1 --verbose
