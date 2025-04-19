@@ -15,7 +15,44 @@ env:
   VCPKG_BINARY_SOURCES: "clear"
 
 jobs:
+  build:name: "RustDesk Windows CI (Stable)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_install:
+        description: "Perform full clean install"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"
+  VCPKG_FEATURE_FLAGS: "-binarycaching,-manifests"  # 禁用所有缓存
+  VCPKG_BINARY_SOURCES: "clear"
+
+jobs:
   build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Clean Install
+      if: ${{ inputs.clean_install }}
+      run: rm -rf "${{ env.VCPKG_ROOT }}"
+
+    - name: Install Dependencies
+      run: |
+        vcpkg install \
+          --triplet x64-windows \
+          --clean-after-build \
+          --recurse \
+          --x-asset-sources=clear \
+          libvpx libyuv openssl
+
+    - name: Build
+      run: cargo build --release --target x86_64-pc-windows-msvc
     runs-on: windows-latest
     timeout-minutes: 75  # 延长超时时间
 
