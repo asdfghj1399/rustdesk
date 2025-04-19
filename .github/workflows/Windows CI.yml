@@ -1,45 +1,44 @@
-name: "🚀 RustDesk手动触发构建（中文优化版）"
+name: "🛠️ RustDesk手动构建（编码问题修复版）"
 
 on:
-  # 手动触发配置（已添加）
   workflow_dispatch:
     inputs:
-      构建模式:
-        description: "选择构建类型"
-        required: true 
-        default: "release"
+      构建类型:
+        description: "选择构建模式"
+        required: true
         type: choice
-        options: 
-          - "release"
-          - "debug"
-      清理缓存:
-        description: "是否彻底清理构建缓存"
+        options: ["release", "debug"]
+        default: "release"
+      强制清理:
+        description: "彻底清除缓存（修复编码问题）"
         type: boolean
         default: false
 
 env:
-  # 中文环境专用配置
+  # 中文环境保障
   LC_ALL: "zh_CN.UTF-8"
-  VCPKG_ROOT: "C:\\rustdesk_build"
+  VCPKG_ROOT: "C:\\vcpkg_build"
+  BUILD_DIR: "C:\\rustdesk_output"  # 固定英文输出路径
 
 jobs:
-  构建任务:
+  构建:
     runs-on: windows-latest
-    
-    steps:
-    - name: "1. 环境初始化"
-      shell: cmd
-      run: |
-        chcp 65001
-        @echo 正在准备构建环境...
-        if %{{ inputs.清理缓存 }}% == true (
-          rd /s/q "%VCPKG_ROOT%" 2>nul
-          rd /s/q target 2>nul
-        )
+    timeout-minutes: 60
 
-    - name: "2. 安装构建工具"
+    steps:
+    - name: "1. 环境净化"
+      if: ${{ inputs.强制清理 }}
       shell: cmd
       run: |
+        chcp 65001 >nul
+        rd /s/q "%VCPKG_ROOT%" 2>nul
+        rd /s/q "%BUILD_DIR%" 2>nul
+        rd /s/q target 2>nul
+
+    - name: "2. 初始化vcpkg"
+      shell: cmd
+      run: |
+        chcp 65001 >nul
         if not exist "%VCPKG_ROOT%\\vcpkg.exe" (
           git clone https://github.com/microsoft/vcpkg "%VCPKG_ROOT%"
           cd "%VCPKG_ROOT%"
@@ -47,31 +46,34 @@ jobs:
         )
         setx PATH "%PATH%;%VCPKG_ROOT%"
 
-    - name: "3. 安装依赖库"
+    - name: "3. 安装依赖（安全模式）"
       shell: cmd
       run: |
         cd "%VCPKG_ROOT%"
         vcpkg install --triplet x64-windows ^
-          libvpx libyuv openssl ^
-          --clean-after-build
+          --clean-after-build ^
+          --recurse ^
+          libvpx libyuv openssl
 
-    - name: "4. 编译项目"
+    - name: "4. 安全构建"
       shell: cmd
       run: |
-        set CARGO_TARGET_DIR=%CD%\\build_output
-        cargo build --%{{ inputs.构建模式 }}% ^
+        set CARGO_TARGET_DIR=%BUILD_DIR%
+        cargo build --%{{ inputs.构建类型 }}% ^
           --target x86_64-pc-windows-msvc ^
           --config "build.rustflags=['-C', 'target-feature=+crt-static']"
         
-        if not exist "%CARGO_TARGET_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.构建模式 }}%\\rustdesk.exe" (
-          echo ::error::编译失败：未生成可执行文件
+        if not exist "%BUILD_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.构建类型 }}%\\rustdesk.exe" (
+          echo ::error::构建失败：未检测到输出文件
+          dir /s "%BUILD_DIR%"
           exit 1
         )
 
     - name: "5. 打包成品"
       uses: actions/upload-artifact@v4
       with:
-        name: RustDesk成品_%{{ github.run_number }}
+        name: RustDesk_%{{ inputs.构建类型 }}%_%{{ github.run_number }}
         path: |
-          build_output/x86_64-pc-windows-msvc/%{{ inputs.构建模式 }}%/rustdesk.exe
-          build_output/x86_64-pc-windows-msvc/%{{ inputs.构建模式 }}%/*.dll
+          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.构建类型 }}%/rustdesk.exe
+          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.构建类型 }}%/*.dll
+        retention-days: 7
