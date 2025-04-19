@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       clean_cache:
-        description: "Clean all build caches (vcpkg + cargo)"
+        description: "Clean all build caches"
         type: boolean
         default: false
 
 env:
-  VCPKG_ROOT: "C:\\vcpkg"  # 改用固定路径（避免 runner.temp 问题）
-  VCPKG_FEATURE_FLAGS: "-binarycaching"   # 禁用二进制缓存
-  RUST_BACKTRACE: "full"   # 启用完整的Rust错误回溯
+  VCPKG_ROOT: "C:\\vcpkg"
+  VCPKG_FEATURE_FLAGS: "-binarycaching"
+  RUST_BACKTRACE: "full"
 
 jobs:
   build:
@@ -20,101 +20,64 @@ jobs:
 
     steps:
     # 1. 清理缓存（可选）
-    - name: "🔥 Nuclear Clean (Optional)"
+    - name: "🔥 Clean Cache"
       if: ${{ inputs.clean_cache }}
       shell: powershell
       run: |
         Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE/target" -ErrorAction SilentlyContinue
 
-    # 2. 检出代码
-    - name: "📥 Checkout Repository"
+    # 2. 检出代码（使用 checkout@v4）
+    - name: "📥 Checkout Code"
       uses: actions/checkout@v4
       with:
         submodules: recursive
         fetch-depth: 0
 
-    # 3. 设置Rust工具链
+    # 3. 设置Rust（官方推荐方式）
     - name: "🦀 Setup Rust"
-      uses: actions-rs/toolchain@v1
+      uses: actions-rust-lang/setup-rust@v1
       with:
-        profile: minimal
-        toolchain: stable
-        targets: x86_64-pc-windows-msvc
-        override: true
+        target: x86_64-pc-windows-msvc
 
     # 4. 安装vcpkg
     - name: "📦 Install vcpkg"
       shell: powershell
       run: |
         if (-not (Test-Path "$env:VCPKG_ROOT/vcpkg.exe")) {
-          Write-Output "::group::Cloning vcpkg"
           git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
           cd "$env:VCPKG_ROOT"
           git checkout 2024.04.17
           .\bootstrap-vcpkg.bat -disableMetrics
-          Write-Output "::endgroup::"
         }
-        & "$env:VCPKG_ROOT/vcpkg" version
 
-    # 5. 安装依赖库（带重试机制）
+    # 5. 安装依赖（带中国镜像加速）
     - name: "🧩 Install Dependencies"
       shell: powershell
+      env:
+        VCPKG_BINARY_SOURCES: "clear;nuget,https://mirrors.ustc.edu.cn/vcpkg,read"
       run: |
-        $maxRetries = 3
-        $packages = @("libvpx[core]", "libyuv[core]", "openssl[core]")
-        
-        foreach ($pkg in $packages) {
-          $attempt = 0
-          while ($attempt -lt $maxRetries) {
-            try {
-              Write-Output "::group::Installing $pkg (Attempt $($attempt+1))"
-              & "$env:VCPKG_ROOT/vcpkg" install $pkg `
-                --triplet=x64-windows `
-                --clean-after-build `
-                --recurse `
-                --debug
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Output "::endgroup::"
-                break
-              }
-            } catch {
-              Write-Output "::warning::Install failed: $_"
-            }
-            Write-Output "::endgroup::"
-            $attempt++
-            if ($attempt -lt $maxRetries) {
-              Start-Sleep -Seconds (30 * $attempt)
-            }
-          }
-          
-          if ($attempt -eq $maxRetries) {
-            Write-Output "::error::Failed to install $pkg after $maxRetries attempts"
-            exit 1
-          }
-        }
+        & "$env:VCPKG_ROOT/vcpkg" install @(
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet=x64-windows --clean-after-build --recurse
 
     # 6. 构建项目
     - name: "🔨 Build Release"
       shell: powershell
       run: |
         $env:Path += ";$env:VCPKG_ROOT/installed/x64-windows/bin"
-        cargo build --release `
-          --target x86_64-pc-windows-msvc `
-          --verbose `
-          2>&1 | Tee-Object -FilePath build.log
-        
+        cargo build --release --target x86_64-pc-windows-msvc -vv
         if (-not (Test-Path "target/release/rustdesk.exe")) {
-          Write-Output "::error::Build failed! Last 50 lines:"
-          Get-Content build.log -Tail 50 | ForEach-Object { Write-Output $_ }
+          Write-Output "::error::Build failed!"
           exit 1
         }
 
-    # 7. 上传产物（可选）
-    - name: "📦 Upload Artifacts"
+    # 7. 上传产物（使用 upload-artifact@v4）
+    - name: "📦 Upload Artifact"
       if: success()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: rustdesk-binaries
         path: |
