@@ -1,10 +1,10 @@
-name: "🚀 RustDesk Windows Build (Verified)"
+name: "🔧 RustDesk Windows Build (Stable)"
 
 on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: "Select build configuration"
+        description: "Select build type"
         required: true
         default: "release"
         type: choice
@@ -13,91 +13,91 @@ on:
 env:
   VCPKG_ROOT: "C:\\vcpkg"
   BUILD_DIR: "C:\\build_output"
-  WORKSPACE: "${{ github.workspace }}\\rustdesk"  # 明确项目子目录
+  VCPKG_BINARY_SOURCES: "clear;default,readwrite"
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
-    - name: "1️⃣ Checkout Repository (Full Depth)"
+    - name: "1️⃣ Checkout Code"
       uses: actions/checkout@v4
       with:
-        path: rustdesk  # 明确检出到子目录
         submodules: recursive
-        fetch-depth: 0  # 获取完整历史
+        path: src
 
-    - name: "2️⃣ Validate Project Structure"
+    - name: "2️⃣ Validate Project"
       shell: powershell
       run: |
-        # 严格验证项目结构
-        $requiredFiles = @("Cargo.toml", "src/main.rs")
-        foreach ($file in $requiredFiles) {
-          if (-not (Test-Path "$env:WORKSPACE\$file")) {
-            Write-Output "::error::Missing required file: $file"
-            Get-ChildItem -Recurse "$env:WORKSPACE"
-            exit 1
-          }
-        }
-        echo "PROJECT_VALIDATED=true" >> $env:GITHUB_ENV
-
-    - name: "3️⃣ Setup Build Environment"
-      shell: powershell
-      run: |
-        # 初始化构建目录
-        New-Item -ItemType Directory -Path "$env:BUILD_DIR" -Force | Out-Null
-        
-        # 安装vcpkg（带重试）
-        $maxRetries = 3
-        $retryCount = 0
-        while ($retryCount -lt $maxRetries) {
-          try {
-            if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-              git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-              & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-            }
-            break
-          } catch {
-            $retryCount++
-            if ($retryCount -eq $maxRetries) { throw }
-            Start-Sleep -Seconds 10
-          }
-        }
-
-    - name: "4️⃣ Install Dependencies"
-      shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
-      run: |
-        & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx",
-          "libyuv",
-          "openssl"
-        ) --triplet x64-windows --clean-after-build
-
-    - name: "5️⃣ Build Project"
-      shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
-      run: |
-        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
-        
-        # 带诊断信息的构建
-        cargo build --${{ inputs.build_type }} `
-          --target x86_64-pc-windows-msvc `
-          -v --message-format=json | Tee-Object -FilePath build_log.json
-        
-        # 解析构建日志验证结果
-        if (-not (Test-Path "$env:BUILD_DIR\x86_64-pc-windows-msvc\${{ inputs.build_type }}\rustdesk.exe")) {
-          Write-Output "::error::Build Failed - Diagnostics:"
-          Get-Content build_log.json | Where-Object { $_ -match '"reason":"compiler-message"' }
+        if (-not (Test-Path "src\\Cargo.toml")) {
+          Write-Output "::error::Cargo.toml not found at $pwd\\src"
+          Get-ChildItem -Recurse
           exit 1
         }
+        echo "WORKSPACE=$pwd\\src" >> $env:GITHUB_ENV
+
+    - name: "3️⃣ Setup vcpkg"
+      shell: powershell
+      run: |
+        # 带缓存的vcpkg安装
+        if (-not (Test-Path "$env:VCPKG_ROOT\\.git")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          git checkout 2024.04.17  # 锁定稳定版本
+          .\\bootstrap-vcpkg.bat -disableMetrics
+        }
+        echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+
+    - name: "4️⃣ Install Dependencies (Fixed)"
+      shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        # 禁用NuGet缓存避免冲突
+        $env:VCPKG_FEATURE_FLAGS = "-binarycaching"
+        
+        & "$env:VCPKG_ROOT\\vcpkg" install @(
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet x64-windows `
+          --clean-after-build `
+          --recurse `
+          --x-asset-sources=clear
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Output "::error::Dependency installation failed"
+          exit 1
+        }
+
+    - name: "5️⃣ Build with Cache"
+      shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
+        
+        # 带缓存的构建
+        cargo build --${{ inputs.build_type }} `
+          --target x86_64-pc-windows-msvc `
+          --config "build.rustflags=['-C', 'target-feature=+crt-static']" `
+          -Z unstable-options `
+          -vv 2>&1 | Tee-Object -FilePath build.log
+
+        # 结果验证
+        $exePath = "$env:BUILD_DIR\\x86_64-pc-windows-msvc\\${{ inputs.build_type }}\\rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+          Write-Output "::error::Build failed - Last 50 lines:"
+          Get-Content build.log | Select-Object -Last 50
+          exit 1
+        }
+        echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
 
     - name: "6️⃣ Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-${{ inputs.build_type }}-${{ github.run_number }}
         path: |
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/rustdesk.exe
+          ${{ env.EXE_PATH }}
           ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/${{ inputs.build_type }}/*.dll
         retention-days: 7
