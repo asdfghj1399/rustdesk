@@ -1,70 +1,125 @@
-name: Rust CI/CD Pipeline (修正版)
+name: CI/CD Pipeline with Manual Trigger
 
 on:
+  # 手动触发配置（网页显示运行按钮）
   workflow_dispatch:
-    inputs: # 手动触发参数区
-      build-mode:
-        description: '构建模式'
+    inputs:
+      build-type:
+        description: '选择构建类型'
+        required: true
+        default: 'release'
         type: choice
         options:
           - debug
           - release
-        default: 'release'
       clean-cache:
-        description: '清除缓存'
+        description: '清除构建缓存'
         type: boolean
         default: false
+      enable-tests:
+        description: '运行单元测试'
+        type: boolean
+        default: true
+
+  # 自动触发配置
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
 
 env:
-  RUST_TOOLCHAIN: "1.75.0"
-  TARGET_ARCH: "x86_64-pc-windows-msvc"
-  CACHE_NAME: rust-cargo-cache
+  NODE_VERSION: '20'      # Node.js版本
+  RUST_VERSION: '1.75.0'  # Rust工具链版本
+  CACHE_KEY: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
 
 jobs:
-  setup: # 环境准备工单
-    runs-on: windows-latest
+  setup:
+    name: 初始化环境
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code 🛎️
-        uses: actions/checkout@v3 # 重要: 使用可用的版本
-        
-      - name: Rust Toolchain 🦀
+      - name: Checkout代码 🛎️
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ env.TARGET_ARCH }}
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
 
-      - name: Cache Dependencies 📦
-        uses: actions/cache@v3 # 使用确认存在的版本
-        with:
-          path: |
-            ~/.cargo/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-  build: # 构建工单
+  build:
+    name: 构建项目
     needs: setup
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
-      - name: Clean Workspace (可选)
-        if: ${{ inputs.clean-cache }}
+      - name: 清理缓存 🔥
+        if: ${{ github.event.inputs.clean-cache }}
         run: |
           cargo clean
-          Remove-Item -Recurse $env:CARGO_HOME\registry\cache
-          
-      - name: Build Release 🛠️
-        run: cargo build --${{ inputs.build-mode }}
-        
-      - name: Upload Artifact 🚀
-        uses: actions/upload-artifact@v3 # 手动修复后的正确版本
-        with: 
-          name: binary-output
+          rm -rf target/
+          echo "缓存已清除"
+
+      - name: 安装依赖 📦
+        uses: actions/cache@v3
+        with:
           path: |
-            target/${{ inputs.build-mode }}/your-app.exe
-            target/${{ inputs.build-mode }}/your-app.pdb
-    
-  test: # 测试工单
-    runs-on: ubuntu-latest
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ env.CACHE_KEY }}
+
+      - name: 项目构建 🛠️
+        run: |
+          cargo build --${{ inputs.build-type }}
+          mkdir -p artifacts
+          cp target/${{ inputs.build-type }}/*.exe artifacts/
+
+      - name: 上传产物 🚀
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: 运行测试
     needs: build
+    if: ${{ github.event.inputs.enable-tests }}
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - run: cargo test --all-features --verbose
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: ./bin
+
+      - name: 单元测试
+        run: cargo test --verbose
+
+      - name: 集成测试
+        run: |
+          ./bin/your-app-test
+          echo "测试结果：$?"
+
+  deploy:
+    name: 部署生产
+    needs: [build, test]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH部署
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_SERVER_IP }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            systemctl stop your-app
+            cp -r ./artifacts /opt/your-app
+            systemctl start your-app
