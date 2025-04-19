@@ -1,127 +1,58 @@
-name: "1️⃣ RustDesk Windows Build (Stable)"
-
-on:
-  workflow_dispatch:
-    inputs:
-      build_type:
-        description: "Build Type"
-        required: true
-        default: "release"
-        type: choice
-        options: ["release", "debug"]
+name: "🚀 RustDesk中文环境构建"
 
 env:
-  VCPKG_ROOT: "C:\\vcpkg"
-  RUST_BACKTRACE: "full"  # 启用完整错误回溯
+  # 强制使用简体中文编码
+  LC_ALL: "zh_CN.UTF-8"  
+  LANG: "zh_CN.UTF-8"
+  VCPKG_ROOT: "C:\\rustdesk_vcpkg"  # 避免空格和中文路径
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 90  # 延长超时时间
-
+    
     steps:
-    - name: "1️⃣ Checkout code"
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0  # 获取完整提交历史
-
-    - name: "2️⃣ Setup vcpkg (Minimal)"
-      shell: pwsh
+    - name: "1. 设置纯净环境"
+      shell: cmd
       run: |
-        # 最小化vcpkg安装
-        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-          git clone --depth 1 https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          cd "$env:VCPKG_ROOT"
-          .\bootstrap-vcpkg.bat -disableMetrics
-        }
-        echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH
+        chcp 65001
+        set PATH=%PATH%;C:\Program Files\Git\usr\bin
+        rd /s/q target 2>nul
 
-    - name: "3️⃣ Install Core Dependencies"
-      shell: pwsh
+    - name: "2. 安装vcpkg"
+      shell: cmd
       run: |
-        cd "$env:VCPKG_ROOT"
-        .\vcpkg install @(
-          "libvpx[core]",
-          "libyuv[core]",
-          "openssl[core]"
-        ) --triplet x64-windows --clean-after-build
+        if not exist "%VCPKG_ROOT%" (
+          git clone https://github.com/microsoft/vcpkg "%VCPKG_ROOT%"
+          cd "%VCPKG_ROOT%"
+          bootstrap-vcpkg.bat -disableMetrics
+        )
+        setx PATH "%PATH%;%VCPKG_ROOT%"
 
-    - name: "4️⃣ Build RustDesk (Debuggable)"
-      shell: pwsh
+    - name: "3. 安装依赖库"
+      shell: cmd
       run: |
-        # 环境检查
-        echo "=== Build Environment ==="
-        cargo --version
-        rustc --version
-        vcpkg list
+        cd "%VCPKG_ROOT%"
+        vcpkg install --triplet x64-windows ^
+          libvpx libyuv openssl ^
+          --clean-after-build
+
+    - name: "4. 构建项目（中文兼容模式）"
+      shell: cmd
+      run: |
+        set CARGO_TARGET_DIR=%CD%\build_output
+        cargo build --release ^
+          --target x86_64-pc-windows-msvc ^
+          --config "build.rustflags=['-C', 'target-feature=+crt-static']"
         
-        # 增量构建（首次失败后重试使用）
-        $buildType = "${{ inputs.build_type }}"
-        $buildCmd = "cargo build --$buildType --target x86_64-pc-windows-msvc -v"
-        
-        # 首次尝试
-        echo "=== First Attempt ==="
-        Invoke-Expression $buildCmd
-        if ($LASTEXITCODE -ne 0) {
-          # 失败后清理并重试
-          echo "::warning::First build failed, cleaning and retrying..."
-          cargo clean
-          Remove-Item -Recurse -Force target\ -ErrorAction SilentlyContinue
-          
-          echo "=== Second Attempt ==="
-          Invoke-Expression $buildCmd
-          if ($LASTEXITCODE -ne 0) {
-            # 最终失败处理
-            echo "::error::Build failed after retry"
-            echo "=== Dependency Tree ==="
-            cargo tree
-            echo "=== Target Directory ==="
-            Get-ChildItem -Recurse target\
-            exit 1
-          }
-        }
-
-        # 验证输出
-        $exePath = "target\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-          echo "::error::EXE not found at expected path"
-          Get-ChildItem -Recurse target\
+        if not exist "%CARGO_TARGET_DIR%\\x86_64-pc-windows-msvc\\release\\rustdesk.exe" (
+          echo ::error::构建失败：未生成EXE文件
           exit 1
-        }
-        echo "EXE_PATH=$exePath" >> $env:GITHUB_ENV
+        )
 
-    - name: "5️⃣ Collect Build Artifacts"
-      shell: pwsh
-      run: |
-        # 收集所有可能需要的文件
-        $buildType = "${{ inputs.build_type }}"
-        $artifactDir = "artifacts_$buildType"
-        
-        New-Item -ItemType Directory -Path $artifactDir -Force
-        Copy-Item "${{ env.EXE_PATH }}" $artifactDir
-        Copy-Item "target\x86_64-pc-windows-msvc\$buildType\*.dll" $artifactDir -ErrorAction SilentlyContinue
-        Copy-Item "target\x86_64-pc-windows-msvc\$buildType\*.pdb" $artifactDir -ErrorAction SilentlyContinue
-        
-        # 生成构建报告
-        $report = @"
-        === Build Report ===
-        Timestamp: $(Get-Date)
-        Build Type: $buildType
-        Executable: $($artifactDir)/$(Split-Path ${{ env.EXE_PATH }} -Leaf)
-        File Size: $((Get-Item ${{ env.EXE_PATH }}).Length / 1MB) MB
-        Dependencies:
-        $(Get-ChildItem $artifactDir | Select-Object Name,Length | Format-Table -AutoSize | Out-String)
-        "@
-        $report | Out-File "$artifactDir/build_report.txt"
-        
-        echo "ARTIFACT_DIR=$artifactDir" >> $env:GITHUB_ENV
-
-    - name: "6️⃣ Upload Artifacts"
+    - name: "5. 打包成果物"
       uses: actions/upload-artifact@v4
       with:
-        name: "rustdesk-${{ inputs.build_type }}-${{ github.run_id }}"
+        name: 最终成品
         path: |
-          ${{ env.ARTIFACT_DIR }}/*
-        retention-days: 7
-        if-no-files-found: error
+          build_output/x86_64-pc-windows-msvc/release/rustdesk.exe
+          build_output/x86_64-pc-windows-msvc/release/*.dll
