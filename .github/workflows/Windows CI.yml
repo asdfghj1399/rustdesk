@@ -1,16 +1,16 @@
-name: "🛠️ RustDesk手动构建（编码问题修复版）"
+name: "🛠️ RustDesk Manual Build (Fixed Encoding Issues)"
 
 on:
   workflow_dispatch:
     inputs:
-      构建类型:
-        description: "选择构建模式"
+      build_type:  # 构建类型
+        description: "Select build mode"
         required: true
         type: choice
         options: ["release", "debug"]
         default: "release"
-      强制清理:
-        description: "彻底清除缓存（修复编码问题）"
+      clean_cache:  # 强制清理
+        description: "Force clean cache (fix encoding issues)"
         type: boolean
         default: false
 
@@ -18,16 +18,16 @@ env:
   # 中文环境保障
   LC_ALL: "zh_CN.UTF-8"
   VCPKG_ROOT: "C:\\vcpkg_build"
-  BUILD_DIR: "C:\\rustdesk_output"  # 固定英文输出路径
+  BUILD_DIR: "C:\\rustdesk_output"  # Fixed English output path
 
 jobs:
-  构建:
+  build:
     runs-on: windows-latest
     timeout-minutes: 60
 
     steps:
-    - name: "1. 环境净化"
-      if: ${{ inputs.强制清理 }}
+    - name: "1. Environment Cleanup"  # 环境净化
+      if: ${{ inputs.clean_cache }}
       shell: cmd
       run: |
         chcp 65001 >nul
@@ -35,7 +35,7 @@ jobs:
         rd /s/q "%BUILD_DIR%" 2>nul
         rd /s/q target 2>nul
 
-    - name: "2. 初始化vcpkg"
+    - name: "2. Initialize vcpkg"  # 初始化vcpkg
       shell: cmd
       run: |
         chcp 65001 >nul
@@ -46,7 +46,7 @@ jobs:
         )
         setx PATH "%PATH%;%VCPKG_ROOT%"
 
-    - name: "3. 安装依赖（安全模式）"
+    - name: "3. Install Dependencies (Safe Mode)"  # 安装依赖（安全模式）
       shell: cmd
       run: |
         cd "%VCPKG_ROOT%"
@@ -55,25 +55,25 @@ jobs:
           --recurse ^
           libvpx libyuv openssl
 
-    - name: "4. 安全构建"
+    - name: "4. Safe Build"  # 安全构建
       shell: cmd
       run: |
         set CARGO_TARGET_DIR=%BUILD_DIR%
-        cargo build --%{{ inputs.构建类型 }}% ^
+        cargo build --%{{ inputs.build_type }}% ^
           --target x86_64-pc-windows-msvc ^
           --config "build.rustflags=['-C', 'target-feature=+crt-static']"
         
-        if not exist "%BUILD_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.构建类型 }}%\\rustdesk.exe" (
-          echo ::error::构建失败：未检测到输出文件
+        if not exist "%BUILD_DIR%\\x86_64-pc-windows-msvc\\%{{ inputs.build_type }}%\\rustdesk.exe" (
+          echo ::error::Build failed: No output file detected
           dir /s "%BUILD_DIR%"
           exit 1
         )
 
-    - name: "5. 打包成品"
+    - name: "5. Package Artifacts"  # 打包成品
       uses: actions/upload-artifact@v4
       with:
-        name: RustDesk_%{{ inputs.构建类型 }}%_%{{ github.run_number }}
+        name: RustDesk_%{{ inputs.build_type }}%_%{{ github.run_number }}
         path: |
-          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.构建类型 }}%/rustdesk.exe
-          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.构建类型 }}%/*.dll
+          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.build_type }}%/rustdesk.exe
+          %BUILD_DIR%/x86_64-pc-windows-msvc/%{{ inputs.build_type }}%/*.dll
         retention-days: 7
