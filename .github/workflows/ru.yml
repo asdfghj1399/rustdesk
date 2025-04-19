@@ -1,86 +1,34 @@
-name: "RustDesk Windows CI (Stable)"
-
-on:
-  workflow_dispatch:
-    inputs:
-      force_clean:
-        description: "Clean vcpkg cache"
-        type: boolean
-        default: false
-
-env:
-  VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_FEATURE_FLAGS: "-binarycaching,-manifests"
-  VCPKG_BINARY_SOURCES: "clear"
-
-jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 75
-
-    steps:
-    - name: "1️⃣ Nuclear Clean"
-      if: ${{ inputs.force_clean }}
-      shell: powershell
-      run: |
-        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
-
-    - name: "2️⃣ Checkout (Deep Clone)"
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0
-
-    - name: "3️⃣ Safe vcpkg Setup"
-      shell: powershell
-      run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          cd "$env:VCPKG_ROOT"
-          git checkout 2024.04.17
-          .\bootstrap-vcpkg.bat -disableMetrics
-        }
-
-    - name: "4️⃣ Bulletproof Dependency Install"
-      shell: powershell
-      run: |
-        $retryCount = 0
-        $maxRetries = 3
+- name: "4️⃣ Bulletproof Dependency Install"
+  shell: powershell
+  run: |
+    $retryCount = 0
+    $maxRetries = 3
+    $packages = @("libvpx[core]", "libyuv[core]", "openssl[core]")
+    
+    :install_loop while ($retryCount -lt $maxRetries) {
+      try {
+        Write-Output "::group::Attempt $($retryCount+1)"
+        & "$env:VCPKG_ROOT\vcpkg" install $packages `
+          --triplet=x64-windows `
+          --clean-after-build `
+          --recurse `
+          --x-asset-sources=clear
         
-        :install_loop while ($retryCount -lt $maxRetries) {
-          try {
-            & "$env:VCPKG_ROOT\vcpkg" install @(
-              "libvpx[core]",
-              "libyuv[core]",
-              "openssl[core]"
-            ) --triplet x64-windows `
-              --clean-after-build `
-              --recurse `
-              --x-asset-sources=clear
-            
-            if ($LASTEXITCODE -eq 0) { break install_loop }
-          } catch {
-            Write-Output "::warning::Attempt $($retryCount+1) failed"
-          }
-          $retryCount++
-          Start-Sleep -Seconds (30 * $retryCount)
+        if ($LASTEXITCODE -eq 0) { 
+          Write-Output "::endgroup::"
+          break install_loop 
         }
-        
-        if ($retryCount -eq $maxRetries) {
-          Write-Output "::error::All installation attempts failed"
-          exit 1
-        }
-
-    - name: "5️⃣ Build with Diagnostics"
-      shell: powershell
-      run: |
-        cargo build --release `
-          --target x86_64-pc-windows-msvc `
-          -vv --message-format=json 2>&1 | Tee-Object -FilePath build.log
-        
-        if (-not (Test-Path "target\\release\\rustdesk.exe")) {
-          Write-Output "::error::Build failed - Last errors:"
-          Get-Content build.log | Select-String -Pattern "error:" -Context 5
-          exit 1
-        }
+      } catch {
+        Write-Output "::warning::Attempt failed: $_"
+      }
+      Write-Output "::endgroup::"
+      $retryCount++
+      Start-Sleep -Seconds (30 * $retryCount)
+    }
+    
+    if ($retryCount -eq $maxRetries) {
+      # 输出详细错误日志
+      Get-Content "$env:VCPKG_ROOT\buildtrees\**\install-*.log" | Out-String
+      Write-Output "::error::Failed to install: $packages"
+      exit 1
+    }
