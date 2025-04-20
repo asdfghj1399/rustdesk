@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (最终修正版)
+name: RustDesk CI/CD (路径修正版)
 
 on:
   workflow_dispatch:
@@ -6,73 +6,58 @@ on:
       build-mode:
         description: '选择构建模式'
         type: choice
-        options:
-          - debug
-          - release
+        options: [debug, release]
         default: 'release'
-      force-clean:
-        description: '强制清理工作区'
-        type: boolean
-        default: false
+
+env:
+  WORKSPACE: ${{ github.workspace }}\src  # 显式声明Windows路径
 
 jobs:
-  init:
-    name: 初始化环境
+  setup:
+    name: 环境初始化
     runs-on: windows-latest
     steps:
-    - name: 检出代码
+    - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: src
-        # 新增深度克隆参数
-        fetch-depth: 0
-        # 强制清理残留锁文件
-        clean: true
+        path: src  # 存储到src子目录
 
-    - name: 修复子模块路径
+    - name: Validate Workspace
       shell: powershell
-      working-directory: ./src  # 关键修复点
       run: |
-        # 确保在代码目录内操作
-        Write-Output "当前路径: $(Get-Location)"
+        # 验证工作目录存在性
+        if (-not (Test-Path "$env:WORKSPACE")) {
+            New-Item -Path "$env:WORKSPACE" -ItemType Directory -Force
+        }
+        Write-Output "##[info]工作目录验证通过: $env:WORKSPACE"
+
+  build:
+    needs: setup
+    runs-on: windows-latest
+    steps:
+    - name: 设置编译环境
+      shell: powershell
+      run: |
+        # 使用显式路径声明
+        $buildRoot = "$env:WORKSPACE"
         
-        # 强制重置子模块
-        git submodule deinit -f .
-        git submodule update --init --force --recursive --depth=1
-        
-        # 验证核心子模块
-        $hbbPath = "libs\hbb_common"
-        if (-not (Test-Path "$hbbPath\.git")) {
-            Write-Output "::error::子模块初始化失败！目录结构："
-            Get-ChildItem -Recurse | Format-Table FullName
+        # 验证路径格式
+        if ($buildRoot -notmatch '^[A-Z]:\\') {
+            Write-Output "::error::无效的路径格式: $buildRoot"
             exit 1
         }
 
-  build:
-    needs: init
-    runs-on: windows-latest
-    steps:
-    - name: 构建准备
-      working-directory: ./src
-      run: |
-        # 设置编译环境
+        # 设置环境变量
         $env:Path += ";C:\Program Files\LLVM\bin"
-        cargo --version
-
-    - name: 清理缓存
-      if: ${{ inputs.force-clean }}
-      working-directory: ./src
-      run: Remove-Item -Recurse target -ErrorAction SilentlyContinue
+        Set-Location $buildRoot
+        Write-Output "当前工作目录: $(Get-Location)"
+        
+        # 调试信息
+        Get-ChildItem | Format-Table Name
 
     - name: 构建项目
-      working-directory: ./src
-      run: cargo build --${{ inputs.build-mode }} --bin rustdesk
-
-    - name: 上传产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-bin
-        path: |
-          src/target/${{ inputs.build-mode }}/rustdesk.exe
-          src/target/${{ inputs.build-mode }}/*.dll
+      shell: powershell
+      working-directory: ${{ env.WORKSPACE }}  # 使用环境变量定义路径
+      run: |
+        cargo build --${{ inputs.build-mode }} --bin rustdesk
