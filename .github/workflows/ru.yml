@@ -1,43 +1,36 @@
-name: RustDesk CI/CD (手动触发版)
+name: RustDesk CI
 
 on:
-  # 手动触发配置
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: '选择构建类型'
-        required: true
-        default: 'release'
-        type: choice
-        options:
-          - debug
-          - release
-      clean_cache:
-        description: '清除构建缓存'
-        type: boolean
-        default: false
-
-  # 自动触发配置（可选）
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 jobs:
   build:
-    name: 构建项目
     runs-on: windows-latest
+
     steps:
-    - name: 检出代码
+    - name: Checkout code
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    - name: 构建项目
-      run: cargo build --${{ github.event.inputs.build_type }}
+    - name: Install VCPKG
+      shell: powershell
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        }
+        & "$env:VCPKG_ROOT\vcpkg" integrate install
 
-    - name: 上传产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-bin
-        path: target/${{ github.event.inputs.build_type }}/rustdesk.exe
+    - name: Install dependencies
+      shell: powershell
+      run: |
+        & "$env:VCPKG_ROOT\vcpkg" install \
+          libvpx[core] \
+          libyuv[core] \
+          --triplet $env:VCPKG_DEFAULT_TRIPLET
+
+    - name: Build project
+      shell: powershell
+      run: |
+        cargo build --release --features "vcpkg" -v
