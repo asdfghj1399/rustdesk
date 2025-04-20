@@ -1,76 +1,73 @@
-name: RustDesk CI/CD (全功能版)
+name: RustDesk CI/CD (最终修正版)
 
 on:
-  # 手动触发配置
   workflow_dispatch:
     inputs:
       build-mode:
         description: '选择构建模式'
-        required: true
         type: choice
         options:
           - debug
           - release
         default: 'release'
-      clean-cache:
-        description: '清除构建缓存'
+      force-clean:
+        description: '强制清理工作区'
         type: boolean
         default: false
 
-  # 自动触发配置
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
 jobs:
-  setup:
-    name: 环境初始化
+  init:
+    name: 初始化环境
     runs-on: windows-latest
     steps:
-    - name: 检出代码及子模块
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
         path: src
+        # 新增深度克隆参数
+        fetch-depth: 0
+        # 强制清理残留锁文件
+        clean: true
 
     - name: 修复子模块路径
       shell: powershell
+      working-directory: ./src  # 关键修复点
       run: |
+        # 确保在代码目录内操作
+        Write-Output "当前路径: $(Get-Location)"
+        
         # 强制重置子模块
         git submodule deinit -f .
-        git submodule update --init --recursive --force
+        git submodule update --init --force --recursive --depth=1
         
-        # 路径标准化处理
-        $hbbPath = "$env:GITHUB_WORKSPACE\src\libs\hbb_common" -replace '/', '\'
-        if (-not (Test-Path $hbbPath)) {
-            Write-Output "::error::关键路径缺失: $hbbPath"
-            Get-ChildItem "$env:GITHUB_WORKSPACE\src\libs" -Recurse
+        # 验证核心子模块
+        $hbbPath = "libs\hbb_common"
+        if (-not (Test-Path "$hbbPath\.git")) {
+            Write-Output "::error::子模块初始化失败！目录结构："
+            Get-ChildItem -Recurse | Format-Table FullName
             exit 1
         }
 
   build:
-    name: 项目构建
-    needs: setup
+    needs: init
     runs-on: windows-latest
     steps:
-    - name: 设置构建环境
-      shell: powershell
+    - name: 构建准备
+      working-directory: ./src
       run: |
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        chcp 65001
+        # 设置编译环境
         $env:Path += ";C:\Program Files\LLVM\bin"
+        cargo --version
 
-    - name: 清理工作区
-      if: ${{ inputs.clean-cache }}
-      run: |
-        Remove-Item -Recurse "$env:GITHUB_WORKSPACE\src\target" -ErrorAction SilentlyContinue
-        cargo clean
+    - name: 清理缓存
+      if: ${{ inputs.force-clean }}
+      working-directory: ./src
+      run: Remove-Item -Recurse target -ErrorAction SilentlyContinue
 
     - name: 构建项目
-      run: |
-        cargo build --${{ inputs.build-mode }} --manifest-path ./src/libs/hbb_common/Cargo.toml
-        cargo build --${{ inputs.build-mode }} --bin rustdesk
+      working-directory: ./src
+      run: cargo build --${{ inputs.build-mode }} --bin rustdesk
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
@@ -79,19 +76,3 @@ jobs:
         path: |
           src/target/${{ inputs.build-mode }}/rustdesk.exe
           src/target/${{ inputs.build-mode }}/*.dll
-        retention-days: 7
-
-  post-build:
-    name: 清理报告
-    needs: build
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: 生成构建报告
-        shell: bash
-        run: |
-          echo "##[group]构建摘要"
-          echo "构建模式: ${{ inputs.build-mode }}"
-          echo "是否清理缓存: ${{ inputs.clean-cache }}"
-          echo "触发时间: $(date +'%Y-%m-%d %H:%M:%S')"
-          echo "##[endgroup]"
