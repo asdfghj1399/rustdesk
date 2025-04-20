@@ -1,45 +1,31 @@
-name: RustDesk CI/CD (依赖修复版)
+name: RustDesk CI/CD (手动触发版)
 
 on:
+  # 手动触发配置
   workflow_dispatch:
     inputs:
       build_type:
         description: '选择构建类型'
-        type: choice
-        options: [debug, release]
+        required: true
         default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+      clean_cache:
+        description: '清除构建缓存'
+        type: boolean
+        default: false
 
-env:
-  VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_DEFAULT_TRIPLET: "x64-windows"
-  RUSTFLAGS: "-C target-feature=+crt-static"
+  # 自动触发配置（可选）
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  setup:
-    name: 环境准备
-    runs-on: windows-latest
-    steps:
-    - name: 安装VCPKG
-      shell: powershell
-      run: |
-        if (Test-Path "$env:VCPKG_ROOT") {
-            Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
-        }
-        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-        & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-        Add-Content -Path $env:GITHUB_PATH -Value "$env:VCPKG_ROOT"
-
-    - name: 安装依赖库
-      shell: powershell
-      run: |
-        & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx[core]",
-          "libyuv[core]",
-          "openssl[core]"
-        ) --triplet $env:VCPKG_DEFAULT_TRIPLET
-
   build:
-    needs: setup
+    name: 构建项目
     runs-on: windows-latest
     steps:
     - name: 检出代码
@@ -47,25 +33,11 @@ jobs:
       with:
         submodules: recursive
 
-    - name: 配置构建环境
-      shell: powershell
-      run: |
-        $env:CMAKE_TOOLCHAIN_FILE = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
-        $env:VCPKGRS_DYNAMIC = "1"
-        $env:LIB = "$env:VCPKG_ROOT\installed\$env:VCPKG_DEFAULT_TRIPLET\lib;$env:LIB"
-        $env:INCLUDE = "$env:VCPKG_ROOT\installed\$env:VCPKG_DEFAULT_TRIPLET\include;$env:INCLUDE"
-
     - name: 构建项目
-      shell: powershell
-      run: |
-        # 手动指定库路径
-        $env:RUSTFLAGS = "-L native=$env:VCPKG_ROOT/installed/$env:VCPKG_DEFAULT_TRIPLET/lib"
-        cargo build --${{ inputs.build_type }} --verbose
+      run: cargo build --${{ github.event.inputs.build_type }}
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-bin
-        path: |
-          target/${{ inputs.build_type }}/rustdesk.exe
-          target/${{ inputs.build_type }}/*.dll
+        path: target/${{ github.event.inputs.build_type }}/rustdesk.exe
