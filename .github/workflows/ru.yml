@@ -1,36 +1,68 @@
-name: RustDesk CI
+name: RustDesk CI/CD (VCPKG修复版)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: '选择构建类型'
+        type: choice
+        options: [debug, release]
+        default: 'release'
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"  # 显式定义环境变量
+  VCPKG_DEFAULT_TRIPLET: "x64-windows"
 
 jobs:
-  build:
+  setup:
+    name: 环境准备
     runs-on: windows-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install VCPKG
+    - name: 初始化路径
       shell: powershell
       run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        # 强制创建目录
+        $vcpkgPath = "$env:VCPKG_ROOT"
+        if (-not (Test-Path $vcpkgPath)) {
+            New-Item -Path $vcpkgPath -ItemType Directory -Force | Out-Null
         }
-        & "$env:VCPKG_ROOT\vcpkg" integrate install
+        Write-Output "VCPKG路径已创建：$vcpkgPath"
 
-    - name: Install dependencies
+    - name: 安装VCPKG
       shell: powershell
       run: |
-        & "$env:VCPKG_ROOT\vcpkg" install \
-          libvpx[core] \
-          libyuv[core] \
-          --triplet $env:VCPKG_DEFAULT_TRIPLET
+        # 验证环境变量存在性
+        if (-not $env:VCPKG_ROOT) {
+            Write-Output "::error::VCPKG_ROOT环境变量未定义！"
+            exit 1
+        }
 
-    - name: Build project
+        # 使用标准化路径
+        $vcpkgPath = Convert-Path $env:VCPKG_ROOT
+        Set-Location $vcpkgPath
+        git clone https://github.com/microsoft/vcpkg . -b 2024.04.12
+        .\bootstrap-vcpkg.bat -disableMetrics
+
+        # 持久化环境变量
+        echo "VCPKG_ROOT=$vcpkgPath" >> $env:GITHUB_ENV
+
+  build:
+    needs: setup
+    runs-on: windows-latest
+    steps:
+    - name: 验证环境变量
       shell: powershell
       run: |
-        cargo build --release --features "vcpkg" -v
+        # 双重验证机制
+        if (-not (Test-Path $env:VCPKG_ROOT)) {
+            Write-Output "::error::VCPKG_ROOT路径验证失败：$env:VCPKG_ROOT"
+            exit 1
+        }
+        Write-Output "VCPKG有效路径：$(Convert-Path $env:VCPKG_ROOT)"
+
+    - name: 构建项目
+      shell: powershell
+      env:
+        VCPKGRS_DYNAMIC: 1  # 启用动态查找
+      run: |
+        cargo build --${{ inputs.build_type }} -v
