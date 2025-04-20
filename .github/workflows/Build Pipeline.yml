@@ -1,52 +1,70 @@
-name: Build Pipeline
+name: Secure Chocolatey Setup
 
 on:
   workflow_dispatch:
 
 env:
-  CHOCOLATEY_VERSION: 2.2.2
-  GRADLE_VERSION: 8.13
+  TARGET_CHOCO_VERSION: 2.4.3
 
 jobs:
-  setup:
+  chocolatey-management:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - name: 配置系统路径
+      - name: 初始化环境
         shell: pwsh
         run: |
-          # 禁用旧路径兼容模式
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
-          
-      - name: 安装Chocolatey
-        shell: pwsh
-        run: |
-          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')) | Out-Null
-          choco upgrade chocolatey --version ${{ env.CHOCOLATEY_VERSION }} -y
-
-      - name: 安装Gradle
-        shell: pwsh
-        run: |
-          choco install gradle --version ${{ env.GRADLE_VERSION }} -y --force
-          refreshenv
-          gradle -v
-
-  build:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-      - name: 验证路径
-        shell: pwsh
-        run: |
-          $pathsToCheck = @(
-              "$env:ChocolateyInstall\lib\gradle",
-              "$env:ProgramData\chocolatey"
+          # 清理旧版本残留
+          $chocoPaths = @(
+              "${env:ProgramData}\chocolatey",
+              "${env:LOCALAPPDATA}\chocolatey"
           )
-          
-          $pathsToCheck | ForEach-Object {
-              if (-not (Test-Path $_)) {
-                  Write-Error "关键路径缺失：$_"
-                  exit 1
+          $chocoPaths | Where-Object { Test-Path $_ } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+          # 重置执行策略
+          Set-ExecutionPolicy Unrestricted -Scope Process -Force
+
+      - name: 智能部署Chocolatey
+        shell: pwsh
+        run: |
+          function Install-Chocolatey {
+              param([string]$Version)
+              
+              $installScript = {
+                  iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+                  if (-not (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe")) {
+                      throw "安装失败"
+                  }
+              }
+
+              try {
+                  if ($Version) {
+                      Write-Output "定向安装v$Version..."
+                      choco install chocolatey --version=$Version -y --force
+                  }
+                  else {
+                      Write-Output "执行标准安装..."
+                      & $installScript
+                  }
+              }
+              catch {
+                  Write-Warning "主安装路径失败，尝试备用方案..."
+                  & $installScript
               }
           }
+
+          # 版本检测逻辑
+          $currentVer = [version]((choco --version 2>$null) -replace '[^\d\.]')
+          $targetVer = [version]$env:TARGET_CHOCO_VERSION
+
+          if (-not $currentVer) {
+              Install-Chocolatey -Version $env:TARGET_CHOCO_VERSION
+          }
+          elseif ($currentVer -ne $targetVer) {
+              Write-Output "当前版本 $currentVer → 目标版本 $targetVer"
+              choco upgrade chocolatey --version=$env:TARGET_CHOCO_VERSION -y --allow-downgrade
+          }
+
+          # 最终验证
+          choco --version
+          choco list -lo
