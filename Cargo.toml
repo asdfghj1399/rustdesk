@@ -1,94 +1,22 @@
 [package]
 name = "rustdesk"
 version = "1.3.9"
-authors = ["rustdesk <info@rustdesk.com>"]
 edition = "2021"
-build= "build.rs"
-description = "RustDesk Remote Desktop"
-default-run = "rustdesk"
-rust-version = "1.75"
-
-[lib]
-name = "librustdesk"
-crate-type = ["cdylib", "staticlib", "rlib"]
-
-[[bin]]
-name = "naming"
-path = "src/naming.rs"
-
-[[bin]]
-name = "service"
-path = "src/service.rs"
+build = "build.rs"
 
 [features]
-inline = []
-cli = []
-use_samplerate = ["samplerate"]
-use_rubato = ["rubato"]
-use_dasp = ["dasp"]
-flutter = ["flutter_rust_bridge"]
-default = ["use_dasp"]
-hwcodec = ["scrap/hwcodec"]
-vram = ["scrap/vram"]
-mediacodec = ["scrap/mediacodec"]
-plugin_framework = []
-linux-pkg-config = ["magnum-opus/linux-pkg-config", "scrap/linux-pkg-config"]
-unix-file-copy-paste = [
-    "dep:x11-clipboard",
-    "dep:x11rb",
-    "dep:percent-encoding",
-    "dep:once_cell",
-    "clipboard/unix-file-copy-paste",
-]
-screencapturekit = ["cpal/screencapturekit"]
-# 新增vcpkg特性
+screencapturekit = ["dep:cpal", "cpal/screencapturekit"]
 vcpkg = ["magnum-opus/vcpkg", "scrap/vcpkg"]
 
 [dependencies]
-async-trait = "0.1"
-whoami = "1.5.0"
-scrap = { path = "libs/scrap", features = ["wayland", "vcpkg"] }  # 添加vcpkg特性
+scrap = { path = "libs/scrap", features = ["wayland", "vcpkg"] }
 hbb_common = { path = "libs/hbb_common" }
-serde_derive = "1.0"
-serde = "1.0"
-serde_json = "1.0"
-serde_repr = "0.1"
-cfg-if = "1.0"
-lazy_static = "1.4"
-sha2 = "0.10"
-repng = "0.2"
-parity-tokio-ipc = { git = "https://github.com/rustdesk-org/parity-tokio-ipc" }
-magnum-opus = { git = "https://github.com/rustdesk-org/magnum-opus", features = ["vcpkg"] }  # 启用vcpkg支持
-dasp = { version = "0.11", features = ["signal", "interpolate-linear", "interpolate"], optional = true }
-rubato = { version = "0.12", optional = true }
-samplerate = { version = "0.2", optional = true }
-uuid = { version = "1.3", features = ["v4"] }
-clap = "4.2"
-rpassword = "7.2"
-num_cpus = "1.15"
-bytes = { version = "1.4", features = ["serde"] }
-default-net = "0.14"
-wol-rs = "1.0"
-flutter_rust_bridge = { version = "=1.80", features = ["uuid"], optional = true}
-errno = "0.3"
-rdev = { git = "https://github.com/rustdesk-org/rdev" }
-url = { version = "2.3", features = ["serde"] }
-crossbeam-queue = "0.3"
-hex = "0.4"
-chrono = "0.4"
-cidr-utils = "0.5"
-libloading = "0.8"
-fon = "0.6"
-zip = "0.6"
-shutdown_hooks = "0.1"
-totp-rs = { version = "5.4", default-features = false, features = ["gen_secret", "otpauth"] }
+cpal = { git = "https://github.com/rustdesk-org/cpal", branch = "osx-screencapturekit", optional = true }
 
-# ... [其他target特定依赖保持不变]
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+cocoa = "0.24"
+core-foundation = "0.9"
 
 [build-dependencies]
-cc = "1.0"
-hbb_common = { path = "libs/hbb_common" }
-os-version = "0.2"
-vcpkg = "0.2"  # 添加vcpkg构建依赖
-
-# ... [其他配置保持不变]
+vcpkg = "0.2"
