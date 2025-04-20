@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (VCPKG修复版)
+name: RustDesk CI/CD (依赖修复版)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,8 @@ on:
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
+  VCPKG_DEFAULT_TRIPLET: "x64-windows"
+  RUSTFLAGS: "-C target-feature=+crt-static"
 
 jobs:
   setup:
@@ -21,27 +22,21 @@ jobs:
     - name: 安装VCPKG
       shell: powershell
       run: |
-        # 清理旧安装
         if (Test-Path "$env:VCPKG_ROOT") {
             Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
         }
-        
-        # 克隆并初始化vcpkg
         git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
         & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        Add-Content -Path $env:GITHUB_PATH -Value "$env:VCPKG_ROOT"
 
     - name: 安装依赖库
       shell: powershell
       run: |
-        # 正确安装命令格式
-        & "$env:VCPKG_ROOT\vcpkg" install `
-          libvpx[core] `
-          libyuv[core] `
-          openssl[core] `
-          --triplet $env:VCPKG_DEFAULT_TRIPLET
-        
-        # 验证安装结果
-        & "$env:VCPKG_ROOT\vcpkg" list --triplet $env:VCPKG_DEFAULT_TRIPLET
+        & "$env:VCPKG_ROOT\vcpkg" install @(
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet $env:VCPKG_DEFAULT_TRIPLET
 
   build:
     needs: setup
@@ -55,18 +50,17 @@ jobs:
     - name: 配置构建环境
       shell: powershell
       run: |
-        # 设置vcpkg集成
-        & "$env:VCPKG_ROOT\vcpkg" integrate install
-        $env:VCPKGRS_DYNAMIC = "1"
-        $env:VCPKG_TARGET_TRIPLET = "$env:VCPKG_DEFAULT_TRIPLET"
         $env:CMAKE_TOOLCHAIN_FILE = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+        $env:VCPKGRS_DYNAMIC = "1"
+        $env:LIB = "$env:VCPKG_ROOT\installed\$env:VCPKG_DEFAULT_TRIPLET\lib;$env:LIB"
+        $env:INCLUDE = "$env:VCPKG_ROOT\installed\$env:VCPKG_DEFAULT_TRIPLET\include;$env:INCLUDE"
 
     - name: 构建项目
       shell: powershell
-      env:
-        RUSTFLAGS: "-C target-feature=+crt-static"
       run: |
-        cargo build --${{ inputs.build_type }} --features "vcpkg" -v
+        # 手动指定库路径
+        $env:RUSTFLAGS = "-L native=$env:VCPKG_ROOT/installed/$env:VCPKG_DEFAULT_TRIPLET/lib"
+        cargo build --${{ inputs.build_type }} --verbose
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
