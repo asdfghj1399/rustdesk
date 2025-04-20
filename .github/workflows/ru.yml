@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (VCPKG修复版)
+name: RustDesk CI/CD
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
 
 env:
   VCPKG_ROOT: "C:\\vcpkg"
-  VCPKG_DEFAULT_TRIPLET: "x64-windows"
+  VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
 
 jobs:
   setup:
@@ -21,27 +21,17 @@ jobs:
     - name: 安装VCPKG
       shell: powershell
       run: |
-        # 清理旧安装
-        if (Test-Path "$env:VCPKG_ROOT") {
-            Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
-        }
-
-        # 克隆并初始化vcpkg
-        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+        git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
         & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-
-        # 设置环境变量
-        Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:VCPKG_ROOT"
-        Add-Content -Path $env:GITHUB_PATH -Value "$env:VCPKG_ROOT"
+        & "$env:VCPKG_ROOT\vcpkg" integrate install
 
     - name: 安装依赖库
       shell: powershell
       run: |
-        & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx[core]",
-          "libyuv[core]",
-          "openssl[core]"
-        ) --triplet $env:VCPKG_DEFAULT_TRIPLET
+        & "$env:VCPKG_ROOT\vcpkg" install \
+          libvpx[core]:$env:VCPKG_DEFAULT_TRIPLET \
+          libyuv[core]:$env:VCPKG_DEFAULT_TRIPLET \
+          openssl[core]:$env:VCPKG_DEFAULT_TRIPLET
 
   build:
     needs: setup
@@ -52,31 +42,18 @@ jobs:
       with:
         submodules: recursive
 
-    - name: 配置构建环境
-      shell: powershell
-      run: |
-        # 设置vcpkg集成
-        & "$env:VCPKG_ROOT\vcpkg" integrate install
-        $env:VCPKGRS_DYNAMIC = "1"
-        $env:VCPKG_TARGET_TRIPLET = "$env:VCPKG_DEFAULT_TRIPLET"
-        $env:CMAKE_TOOLCHAIN_FILE = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
-
-        # 显示配置信息
-        Write-Output "##[group]VCPKG配置"
-        vcpkg list
-        Write-Output "##[endgroup]"
-
     - name: 构建项目
       shell: powershell
       env:
+        VCPKGRS_DYNAMIC: "1"
         RUSTFLAGS: "-C target-feature=+crt-static"
       run: |
-        cargo build --${{ inputs.build_type }} --features "vcpkg" -v
+        cargo build --release --features "vcpkg" -v
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-bin
         path: |
-          target/${{ inputs.build_type }}/rustdesk.exe
-          target/${{ inputs.build_type }}/*.dll
+          target/release/rustdesk.exe
+          target/release/*.dll
