@@ -3,64 +3,123 @@ name: RustDesk CI/CD (终极修复版)
 on:
   workflow_dispatch:
     inputs:
-      build-mode:
-        description: 'Build Type'
-        type: choice
-        options: [debug, release]
-        default: 'release'
+      clean_build:
+        description: '执行完全清理重建'
+        type: boolean
+        default: false
 
 env:
+  BUILD_MODE: release
   WORKSPACE: ${{ github.workspace }}\src
+  VCPKG_ROOT: C:\vcpkg
+  RUST_TOOLCHAIN: 1.75.0
 
 jobs:
   setup:
+    name: 环境初始化
     runs-on: windows-latest
     steps:
-    - name: Checkout Code
+    - name: 清理工作区
+      if: ${{ inputs.clean_build }}
+      shell: powershell
+      run: |
+        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:WORKSPACE" -ErrorAction SilentlyContinue
+
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
         path: src
+        clean: true
+        fetch-depth: 0
 
-    - name: Validate Paths
+    - name: 修复子模块权限
       shell: powershell
+      working-directory: $env:WORKSPACE
       run: |
-        # 强制设置编码为UTF-8 BOM
-        $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        chcp 65001 | Out-Null
+        # 递归设置文件权限
+        icacls . /grant Everyone:(OI)(CI)F /T
+        # 重置文件属性
+        Get-ChildItem -Recurse | % { $_.Attributes = "Normal" }
 
-        # 路径标准化处理
-        $workspace = "$env:WORKSPACE" -replace '/', '\'
-        if (-not (Test-Path $workspace)) {
-            New-Item -Path $workspace -ItemType Directory -Force
-        }
-
-        # ASCII-only输出
-        Write-Output "##[group]Path Verification"
-        Write-Output "Workspace Path: $workspace"
-        Write-Output "Current Directory: $(Get-Location)"
-        Write-Output "##[endgroup]"
-
-  build:
+  build-deps:
+    name: 安装依赖
     needs: setup
     runs-on: windows-latest
     steps:
-    - name: Build Setup
+    - name: 安装系统工具
       shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
       run: |
-        # 安全路径验证
-        if (-not (Test-Path .)) {
-            Write-Output "::error::Workspace path not found: $pwd"
-            exit 1
+        choco install -y cmake llvm nasm python --version=3.9.13
+        refreshenv
+
+    - name: 配置vcpkg
+      shell: powershell
+      run: |
+        if (-not (Test-Path $env:VCPKG_ROOT)) {
+          git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+        }
+        & "$env:VCPKG_ROOT\vcpkg" install libvpx libyuv openssl --triplet x64-windows
+
+  build:
+    name: 构建项目
+    needs: build-deps
+    runs-on: windows-latest
+    steps:
+    - name: 配置Rust环境
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
+        target: x86_64-pc-windows-msvc
+        override: true
+
+    - name: 构建核心库
+      shell: powershell
+      working-directory: $env:WORKSPACE
+      env:
+        VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        cargo build --${{ env.BUILD_MODE }} --manifest-path libs/hbb_common/Cargo.toml
+
+    - name: 构建主程序
+      shell: powershell
+      working-directory: $env:WORKSPACE
+      run: |
+        cargo build --${{ env.BUILD_MODE }} --bin rustdesk
+        if (-not (Test-Path "target\$env:BUILD_MODE\rustdesk.exe")) {
+          Write-Output "::error::可执行文件未生成"
+          Get-ChildItem target\$env:BUILD_MODE
+          exit 1
         }
 
-        # 使用ASCII字符显示信息
-        Write-Output "Build starting in: $(Get-Location)"
-        cargo build --${{ inputs.build-mode }}
-
-    - name: Upload Artifacts
+  artifacts:
+    name: 产物打包
+    needs: build
+    runs-on: windows-latest
+    steps:
+    - name: 上传可执行文件
       uses: actions/upload-artifact@v4
       with:
-        name: binaries
-        path: ${{ env.WORKSPACE }}/target/${{ inputs.build-mode }}/*.exe
+        name: rustdesk-bin
+        path: |
+          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\rustdesk.exe
+          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\*.dll
+        retention-days: 7
+
+  post-build:
+    name: 清理报告
+    needs: artifacts
+    if: always()
+    runs-on: windows-latest
+    steps:
+    - name: 生成构建摘要
+      shell: powershell
+      run: |
+        Write-Output "##[group]构建摘要"
+        Write-Output "构建模式: ${{ env.BUILD_MODE }}"
+        Write-Output "构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Output "工作目录: $env:WORKSPACE"
+        Write-Output "##[endgroup]"
