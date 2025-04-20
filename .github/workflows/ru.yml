@@ -1,125 +1,74 @@
-name: RustDesk CI/CD (终极修复版)
+name: RustDesk CI/CD (路径问题修复版)
 
 on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: '执行完全清理重建'
+        description: '执行完全清理'
         type: boolean
         default: false
 
 env:
-  BUILD_MODE: release
-  WORKSPACE: ${{ github.workspace }}\src
+  WORKSPACE: ${{ github.workspace }}\src  # 显式声明Windows路径格式
   VCPKG_ROOT: C:\vcpkg
-  RUST_TOOLCHAIN: 1.75.0
 
 jobs:
   setup:
     name: 环境初始化
     runs-on: windows-latest
     steps:
-    - name: 清理工作区
-      if: ${{ inputs.clean_build }}
+    - name: 创建工作目录
       shell: powershell
       run: |
-        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:WORKSPACE" -ErrorAction SilentlyContinue
+        # 强制创建带空格的路径
+        $workspace = "$env:WORKSPACE"
+        if (-not (Test-Path $workspace)) {
+            New-Item -Path $workspace -ItemType Directory -Force
+        }
+        Write-Output "##[info]工作目录已创建：$workspace"
 
     - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: src
+        path: ${{ env.WORKSPACE }}  # 修正路径引用方式
         clean: true
-        fetch-depth: 0
 
-    - name: 修复子模块权限
+    - name: 修复文件权限
       shell: powershell
-      working-directory: $env:WORKSPACE
+      working-directory: ${{ env.WORKSPACE }}  # 使用表达式语法
       run: |
-        # 递归设置文件权限
-        icacls . /grant Everyone:(OI)(CI)F /T
-        # 重置文件属性
-        Get-ChildItem -Recurse | % { $_.Attributes = "Normal" }
+        # 验证路径存在性
+        if (-not (Test-Path .)) {
+            Write-Output "::error::工作目录不存在：$pwd"
+            exit 1
+        }
 
-  build-deps:
-    name: 安装依赖
+        # 递归设置权限（使用绝对路径）
+        $fullPath = Convert-Path .
+        icacls "$fullPath" /grant Everyone:(OI)(CI)F /T
+        Write-Output "##[info]权限已设置：$fullPath"
+
+  build:
     needs: setup
     runs-on: windows-latest
     steps:
-    - name: 安装系统工具
+    - name: 显示环境信息
       shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
       run: |
-        choco install -y cmake llvm nasm python --version=3.9.13
-        refreshenv
-
-    - name: 配置vcpkg
-      shell: powershell
-      run: |
-        if (-not (Test-Path $env:VCPKG_ROOT)) {
-          git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
-        }
-        & "$env:VCPKG_ROOT\vcpkg" install libvpx libyuv openssl --triplet x64-windows
-
-  build:
-    name: 构建项目
-    needs: build-deps
-    runs-on: windows-latest
-    steps:
-    - name: 配置Rust环境
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: ${{ env.RUST_TOOLCHAIN }}
-        target: x86_64-pc-windows-msvc
-        override: true
-
-    - name: 构建核心库
-      shell: powershell
-      working-directory: $env:WORKSPACE
-      env:
-        VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
-      run: |
-        $ErrorActionPreference = "Stop"
-        cargo build --${{ env.BUILD_MODE }} --manifest-path libs/hbb_common/Cargo.toml
-
-    - name: 构建主程序
-      shell: powershell
-      working-directory: $env:WORKSPACE
-      run: |
-        cargo build --${{ env.BUILD_MODE }} --bin rustdesk
-        if (-not (Test-Path "target\$env:BUILD_MODE\rustdesk.exe")) {
-          Write-Output "::error::可执行文件未生成"
-          Get-ChildItem target\$env:BUILD_MODE
-          exit 1
-        }
-
-  artifacts:
-    name: 产物打包
-    needs: build
-    runs-on: windows-latest
-    steps:
-    - name: 上传可执行文件
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-bin
-        path: |
-          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\rustdesk.exe
-          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\*.dll
-        retention-days: 7
-
-  post-build:
-    name: 清理报告
-    needs: artifacts
-    if: always()
-    runs-on: windows-latest
-    steps:
-    - name: 生成构建摘要
-      shell: powershell
-      run: |
-        Write-Output "##[group]构建摘要"
-        Write-Output "构建模式: ${{ env.BUILD_MODE }}"
-        Write-Output "构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-        Write-Output "工作目录: $env:WORKSPACE"
+        Write-Output "##[group]路径诊断信息"
+        Write-Output "工作目录：$pwd"
+        Get-ChildItem | Format-Table Name, FullName
         Write-Output "##[endgroup]"
+
+    - name: 构建项目
+      shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        cargo build --release
+        if (-not (Test-Path "target\release\rustdesk.exe")) {
+            Write-Output "::error::构建产物未生成"
+            Get-ChildItem target\release
+            exit 1
+        }
