@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (编码问题修复版)
+name: RustDesk CI/CD (终极修复版)
 
 on:
   workflow_dispatch:
@@ -11,67 +11,99 @@ on:
 env:
   WORKSPACE: "${{ github.workspace }}\\src"
   VCPKG_ROOT: "C:\\vcpkg"
+  CARGO_HOME: "${{ github.workspace }}\\.cargo"
 
 jobs:
   setup:
     name: Environment Setup
     runs-on: windows-latest
     steps:
-    - name: Create Workspace
+    - name: Initialize Directories
       shell: powershell
       run: |
         # 强制设置UTF-8编码环境
         $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         chcp 65001 | Out-Null
 
-        # 路径标准化处理
-        $workspace = "$env:WORKSPACE" -replace '\\{2,}', '\'
+        # 创建规范化路径
+        $workspace = "$env:WORKSPACE" -replace '\\\\', '\'
         if (-not (Test-Path $workspace)) {
             New-Item -Path $workspace -ItemType Directory -Force | Out-Null
         }
-        Write-Output "##[info]Workspace created: $workspace"
+        Write-Output "##[info]Workspace validated: $workspace"
 
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: ${{ env.WORKSPACE }}
+        path: "${{ env.WORKSPACE }}"
         clean: true
         fetch-depth: 0
 
-    - name: Fix Permissions
+    - name: Set File Permissions
       shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
       run: |
-        # 统一使用ASCII字符输出
-        Write-Output "##[group]Setting File Permissions"
-        $fullPath = Convert-Path .
-        icacls "$fullPath" /grant "Everyone:(OI)(CI)F" /T /C
-        Write-Output "##[info]Permissions set for: $fullPath"
-        Write-Output "##[endgroup]"
+        # 获取绝对路径
+        $fullPath = [System.IO.Path]::GetFullPath("$env:WORKSPACE")
+        
+        # 递归设置权限
+        icacls "$fullPath" /grant "*S-1-1-0:(OI)(CI)F" /T /C /Q
+        
+        # 验证权限设置
+        $acl = Get-ACL "$fullPath"
+        Write-Output "##[info]Final permissions for $fullPath"
+        $acl.Access | Format-Table IdentityReference, FileSystemRights -AutoSize
 
   build:
     needs: setup
     runs-on: windows-latest
     steps:
+    - name: Build Preparation
+      shell: powershell
+      working-directory: "${{ env.WORKSPACE }}"
+      run: |
+        # 设置环境变量
+        $env:Path += ";$env:VCPKG_ROOT;"
+        $env:CARGO_TARGET_DIR = "${{ github.workspace }}\\target"
+
+        # 显示关键路径
+        Write-Output "##[group]Build Environment"
+        Write-Output "Workspace: $pwd"
+        Write-Output "VCPKG_ROOT: $env:VCPKG_ROOT"
+        Write-Output "CARGO_HOME: $env:CARGO_HOME"
+        Write-Output "##[endgroup]"
+
     - name: Build Project
       shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
       run: |
-        # ASCII-only输出
-        Write-Output "##[group]Build Process"
-        cargo build --release
-        if (-not (Test-Path "target\\release\\rustdesk.exe")) {
-            Write-Output "::error::Build artifact missing!"
+        # 使用绝对路径构建
+        cargo build --release --manifest-path "$env:WORKSPACE\\Cargo.toml"
+        
+        # 验证产物存在性
+        $exePath = "$env:CARGO_TARGET_DIR\\release\\rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+            Write-Output "::error::Build failed - Missing $exePath"
+            Get-ChildItem "$env:CARGO_TARGET_DIR\\release"
             exit 1
         }
-        Write-Output "##[info]Build successful!"
-        Write-Output "##[endgroup]"
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: rustdesk-bin
+        name: release-binaries
         path: |
-          ${{ env.WORKSPACE }}\target\release\rustdesk.exe
-          ${{ env.WORKSPACE }}\target\release\*.dll
+          ${{ env.CARGO_TARGET_DIR }}\\release\\rustdesk.exe
+          ${{ env.CARGO_TARGET_DIR }}\\release\\*.dll
+        retention-days: 7
+
+  post-build:
+    name: Cleanup
+    needs: build
+    if: always()
+    runs-on: windows-latest
+    steps:
+    - name: Remove Temporary Files
+      shell: powershell
+      run: |
+        Remove-Item -Path "$env:WORKSPACE\\target" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$env:CARGO_HOME\\registry" -Recurse -Force -ErrorAction SilentlyContinue
