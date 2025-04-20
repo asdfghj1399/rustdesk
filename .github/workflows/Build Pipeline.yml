@@ -1,0 +1,52 @@
+name: Build Pipeline
+
+on:
+  workflow_dispatch:
+
+env:
+  CHOCOLATEY_VERSION: 2.2.2
+  GRADLE_VERSION: 8.13
+
+jobs:
+  setup:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: 配置系统路径
+        shell: pwsh
+        run: |
+          # 禁用旧路径兼容模式
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+          
+      - name: 安装Chocolatey
+        shell: pwsh
+        run: |
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')) | Out-Null
+          choco upgrade chocolatey --version ${{ env.CHOCOLATEY_VERSION }} -y
+
+      - name: 安装Gradle
+        shell: pwsh
+        run: |
+          choco install gradle --version ${{ env.GRADLE_VERSION }} -y --force
+          refreshenv
+          gradle -v
+
+  build:
+    needs: setup
+    runs-on: windows-latest
+    steps:
+      - name: 验证路径
+        shell: pwsh
+        run: |
+          $pathsToCheck = @(
+              "$env:ChocolateyInstall\lib\gradle",
+              "$env:ProgramData\chocolatey"
+          )
+          
+          $pathsToCheck | ForEach-Object {
+              if (-not (Test-Path $_)) {
+                  Write-Error "关键路径缺失：$_"
+                  exit 1
+              }
+          }
