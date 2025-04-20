@@ -1,58 +1,99 @@
-name: RustDesk CI/CD (编码问题修复版)
+name: RustDesk Windows Build
 
 on:
   workflow_dispatch:
     inputs:
-      build-mode:
-        description: 'Build Type'
-        type: choice
-        options: [debug, release]
-        default: 'release'
+      clean_build:
+        description: "Perform full clean rebuild"
+        type: boolean
+        default: false
+
+env:
+  VCPKG_ROOT: "C:\\vcpkg"
+  BUILD_DIR: "C:\\build_output"
+  RUST_BACKTRACE: "full"
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 90
+
     steps:
-    - name: Checkout Code
+    - name: Clean workspace (if needed)
+      if: ${{ inputs.clean_build }}
+      shell: powershell
+      run: |
+        Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:BUILD_DIR" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
+
+    - name: Checkout code (with safe permissions)
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        path: src
+        clean: true
+        fetch-depth: 0
 
-    - name: Setup Environment
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@v1
+      with:
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+        components: rustfmt, clippy
+
+    - name: Install build dependencies
       shell: powershell
       run: |
-        # 强制设置UTF-8编码环境
-        $ErrorActionPreference = 'Stop'
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        chcp 65001 | Out-Null
+        # 安装必要系统工具
+        choco install -y cmake llvm nasm python --version=3.9.13
+        refreshenv
 
-        # 使用ASCII字符输出路径信息
-        Write-Output "##[group]Path Configuration"
-        Write-Output "Workspace Path: $env:GITHUB_WORKSPACE"
-        $currentPath = (Get-Location).Path
-        Write-Output "Current Path: $currentPath"
-        Write-Output "##[endgroup]"
-
-        # 路径标准化处理
-        $buildPath = "$env:GITHUB_WORKSPACE\src" -replace '/', '\'
-        if (-not (Test-Path $buildPath)) {
-            New-Item -Path $buildPath -ItemType Directory -Force
+        # 设置vcpkg
+        if (-not (Test-Path "$env:VCPKG_ROOT")) {
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          cd "$env:VCPKG_ROOT"
+          .\bootstrap-vcpkg.bat -disableMetrics
         }
 
-    - name: Build Project
+        # 安装依赖库
+        & "$env:VCPKG_ROOT\vcpkg" install @(
+          "libvpx[core]",
+          "libyuv[core]",
+          "openssl[core]"
+        ) --triplet x64-windows --clean-after-build
+
+    - name: Build RustDesk (with permission fix)
       shell: powershell
-      working-directory: $env:GITHUB_WORKSPACE\src
       run: |
-        # 验证编码设置
-        Write-Output "##[group]Encoding Status"
-        Write-Output "Console Encoding: [$(chcp)]"
-        Write-Output "PowerShell Encoding: $([Console]::OutputEncoding.EncodingName)"
-        Write-Output "##[endgroup]"
+        # 修复权限问题
+        $ErrorActionPreference = "Stop"
+        $buildType = "release"
+        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
 
-        # 安全构建命令
-        try {
-            cargo build --${{ inputs.build-mode }}
-        } catch {
-            Write-Output "::error::Build failed with exit code $LASTEXITCODE"
-            exit 1
+        # 显式设置工作目录
+        Set-Location -Path "$env:GITHUB_WORKSPACE\src"
+
+        # 修复文件权限
+        Get-ChildItem -Recurse | ForEach-Object {
+          $_.Attributes = "Normal"
         }
+
+        # 构建项目
+        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+
+        # 验证输出
+        $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+          Write-Output "::error::Build failed - Missing executable"
+          exit 1
+        }
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-build
+        path: |
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/release/*.exe
+          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/release/*.dll
+        retention-days: 7
