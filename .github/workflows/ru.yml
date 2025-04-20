@@ -1,53 +1,117 @@
+name: Build Flutter Windows - Optimized
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  RUST_VERSION: "1.75.0"
+  VCPKG_COMMIT_ID: "2024.04.12"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_ROOT: C:\vcpkg
+
 jobs:
+  setup-dependencies:
+    runs-on: windows-2022
+    outputs:
+      vcpkg_cache_key: ${{ steps.vcpkg-cache.outputs.cache-key }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Generate vcpkg cache key
+        id: vcpkg-cache
+        run: echo "cache-key=vcpkg-${{ runner.os }}-${{ env.VCPKG_COMMIT_ID }}" >> $GITHUB_OUTPUT
+
   build-for-windows-flutter:
-    name: ${{ matrix.job.target }}
-    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    needs: [setup-dependencies]
     runs-on: windows-2022
     strategy:
-      fail-fast: false
       matrix:
-        job:
-          - {
-              target: x86_64-pc-windows-msvc,
-              arch: x86_64,
-              vcpkg-triplet: x64-windows-static,
-              build_type: "hwcodec,flutter,vram"
-            }
-
+        arch: [x86_64]
+        build_type: [hwcodec,flutter,vram]
+    
     env:
       RUSTFLAGS: "-C target-feature=+crt-static"
-      VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
-      VCPKG_ROOT: C:\vcpkg
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
 
     steps:
-      - name: 初始化环境变量
-        shell: powershell
-        run: |
-          [System.Environment]::SetEnvironmentVariable('VCPKG_ROOT', 'C:\vcpkg', 'Machine')
-          $env:Path += ";C:\vcpkg"
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - uses: actions/cache@v3
-        name: 缓存vcpkg
+      - name: Restore vcpkg cache
+        uses: actions/cache@v3
         with:
           path: C:\vcpkg
-          key: ${{ runner.os }}-vcpkg-${{ env.VCPKG_COMMIT_ID }}
+          key: ${{ needs.setup-dependencies.outputs.vcpkg_cache_key }}
 
-      - name: 安装vcpkg依赖
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Install Build Dependencies
         shell: powershell
         run: |
           & "$env:VCPKG_ROOT\vcpkg" install \
             libvpx[core] \
             libyuv[core] \
+            opus[core] \
             --triplet $env:VCPKG_DEFAULT_TRIPLET
-          if (-not $?) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: 构建RustDesk
+      - name: Build RustDesk
         shell: powershell
         run: |
-          # 强制刷新依赖关系
+          $ErrorActionPreference = "Stop"
+          
+          # 更新依赖锁定
           cargo update -p magnum-opus
           
-          python .\build.py --features ${{ matrix.job.build_type }} `
+          # 构建核心库
+          cargo build --release --features ${{ matrix.build_type }}
+          
+          # 构建Flutter部分
+          python .\build.py `
+            --features ${{ matrix.build_type }} `
             --portable `
             --skip-portable-pack `
             --vcpkg-root "$env:VCPKG_ROOT"
+          
+          # 验证输出文件
+          if (-not (Test-Path ".\target\release\rustdesk.exe")) {
+            Write-Error "Build failed: rustdesk.exe not found"
+            exit 1
+          }
+
+      - name: Package Artifacts
+        shell: powershell
+        run: |
+          $version = (Get-Item ".\target\release\rustdesk.exe").VersionInfo.FileVersion
+          Compress-Archive -Path ".\target\release\*" -DestinationPath "rustdesk-$version-${{ matrix.arch }}.zip"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows
+          path: |
+            .\rustdesk-*.zip
+            .\target\release\rustdesk.exe
