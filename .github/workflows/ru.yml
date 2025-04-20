@@ -1,63 +1,58 @@
-name: RustDesk CI/CD (路径修正版)
+name: RustDesk CI/CD (编码问题修复版)
 
 on:
   workflow_dispatch:
     inputs:
       build-mode:
-        description: '选择构建模式'
+        description: 'Build Type'
         type: choice
         options: [debug, release]
         default: 'release'
 
-env:
-  WORKSPACE: ${{ github.workspace }}\src  # 显式声明Windows路径
-
 jobs:
-  setup:
-    name: 环境初始化
+  build:
     runs-on: windows-latest
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: src  # 存储到src子目录
 
-    - name: Validate Workspace
+    - name: Setup Environment
       shell: powershell
       run: |
-        # 验证工作目录存在性
-        if (-not (Test-Path "$env:WORKSPACE")) {
-            New-Item -Path "$env:WORKSPACE" -ItemType Directory -Force
+        # 强制设置UTF-8编码环境
+        $ErrorActionPreference = 'Stop'
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        chcp 65001 | Out-Null
+
+        # 使用ASCII字符输出路径信息
+        Write-Output "##[group]Path Configuration"
+        Write-Output "Workspace Path: $env:GITHUB_WORKSPACE"
+        $currentPath = (Get-Location).Path
+        Write-Output "Current Path: $currentPath"
+        Write-Output "##[endgroup]"
+
+        # 路径标准化处理
+        $buildPath = "$env:GITHUB_WORKSPACE\src" -replace '/', '\'
+        if (-not (Test-Path $buildPath)) {
+            New-Item -Path $buildPath -ItemType Directory -Force
         }
-        Write-Output "##[info]工作目录验证通过: $env:WORKSPACE"
 
-  build:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-    - name: 设置编译环境
+    - name: Build Project
       shell: powershell
+      working-directory: $env:GITHUB_WORKSPACE\src
       run: |
-        # 使用显式路径声明
-        $buildRoot = "$env:WORKSPACE"
-        
-        # 验证路径格式
-        if ($buildRoot -notmatch '^[A-Z]:\\') {
-            Write-Output "::error::无效的路径格式: $buildRoot"
+        # 验证编码设置
+        Write-Output "##[group]Encoding Status"
+        Write-Output "Console Encoding: [$(chcp)]"
+        Write-Output "PowerShell Encoding: $([Console]::OutputEncoding.EncodingName)"
+        Write-Output "##[endgroup]"
+
+        # 安全构建命令
+        try {
+            cargo build --${{ inputs.build-mode }}
+        } catch {
+            Write-Output "::error::Build failed with exit code $LASTEXITCODE"
             exit 1
         }
-
-        # 设置环境变量
-        $env:Path += ";C:\Program Files\LLVM\bin"
-        Set-Location $buildRoot
-        Write-Output "当前工作目录: $(Get-Location)"
-        
-        # 调试信息
-        Get-ChildItem | Format-Table Name
-
-    - name: 构建项目
-      shell: powershell
-      working-directory: ${{ env.WORKSPACE }}  # 使用环境变量定义路径
-      run: |
-        cargo build --${{ inputs.build-mode }} --bin rustdesk
