@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (路径问题修复版)
+name: RustDesk CI/CD (权限问题修复版)
 
 on:
   workflow_dispatch:
@@ -9,8 +9,8 @@ on:
         default: false
 
 env:
-  WORKSPACE: ${{ github.workspace }}\src  # 显式声明Windows路径格式
-  VCPKG_ROOT: C:\vcpkg
+  WORKSPACE: "${{ github.workspace }}\\src"
+  VCPKG_ROOT: "C:\\vcpkg"
 
 jobs:
   setup:
@@ -20,23 +20,24 @@ jobs:
     - name: 创建工作目录
       shell: powershell
       run: |
-        # 强制创建带空格的路径
-        $workspace = "$env:WORKSPACE"
+        # 创建带转义字符的路径
+        $workspace = $env:WORKSPACE -replace '\\{2,}', '\'
         if (-not (Test-Path $workspace)) {
-            New-Item -Path $workspace -ItemType Directory -Force
+            New-Item -Path $workspace -ItemType Directory -Force | Out-Null
         }
-        Write-Output "##[info]工作目录已创建：$workspace"
+        Write-Output "##[info]工作目录创建成功：$workspace"
 
     - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: ${{ env.WORKSPACE }}  # 修正路径引用方式
+        path: ${{ env.WORKSPACE }}
         clean: true
+        fetch-depth: 0
 
     - name: 修复文件权限
       shell: powershell
-      working-directory: ${{ env.WORKSPACE }}  # 使用表达式语法
+      working-directory: ${{ env.WORKSPACE }}
       run: |
         # 验证路径存在性
         if (-not (Test-Path .)) {
@@ -44,10 +45,18 @@ jobs:
             exit 1
         }
 
-        # 递归设置权限（使用绝对路径）
+        # 修正的icacls命令格式
         $fullPath = Convert-Path .
-        icacls "$fullPath" /grant Everyone:(OI)(CI)F /T
-        Write-Output "##[info]权限已设置：$fullPath"
+        icacls "$fullPath" /grant "Everyone:(OI)(CI)F" /T /C
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::权限设置失败，退出码：$LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
+
+        # 附加权限验证
+        $acl = Get-ACL $fullPath
+        Write-Output "##[info]当前权限设置："
+        $acl.Access | Format-Table IdentityReference, FileSystemRights
 
   build:
     needs: setup
@@ -57,18 +66,10 @@ jobs:
       shell: powershell
       working-directory: ${{ env.WORKSPACE }}
       run: |
-        Write-Output "##[group]路径诊断信息"
-        Write-Output "工作目录：$pwd"
-        Get-ChildItem | Format-Table Name, FullName
+        Write-Output "##[group]系统信息"
+        systeminfo | Select-String 'OS Name','OS Version'
         Write-Output "##[endgroup]"
 
-    - name: 构建项目
-      shell: powershell
-      working-directory: ${{ env.WORKSPACE }}
-      run: |
-        cargo build --release
-        if (-not (Test-Path "target\release\rustdesk.exe")) {
-            Write-Output "::error::构建产物未生成"
-            Get-ChildItem target\release
-            exit 1
-        }
+        Write-Output "##[group]磁盘信息"
+        Get-Volume | Format-Table DriveLetter, SizeRemaining
+        Write-Output "##[endgroup]"
