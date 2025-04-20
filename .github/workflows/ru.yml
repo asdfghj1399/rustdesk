@@ -1,117 +1,139 @@
-name: Build Flutter Windows - Optimized
+# 文件路径: .github/workflows/build-windows.yml
+name: Windows Build Pipeline
 
 on:
+  # 手动触发选项
   workflow_dispatch:
+  # 代码推送时触发
   push:
-    branches: [main]
+    branches: [ main, release/* ]
+    paths:
+      - 'rust/**'
+      - 'flutter/**'
+      - '.github/workflows/build-windows.yml'
+  # 每天凌晨构建测试
+  schedule:
+    - cron: '0 0 * * *'
 
 env:
   RUST_VERSION: "1.75.0"
-  VCPKG_COMMIT_ID: "2024.04.12"
+  VCPKG_TAG: "2024.04"  # 官方release标签
   FLUTTER_VERSION: "3.24.5"
   VCPKG_ROOT: C:\vcpkg
 
 jobs:
-  setup-dependencies:
-    runs-on: windows-2022
+  # 版本解析阶段
+  resolve-versions:
+    name: Determine Build Versions
+    runs-on: ubuntu-latest
     outputs:
-      vcpkg_cache_key: ${{ steps.vcpkg-cache.outputs.cache-key }}
+      vcpkg_commit: ${{ steps.vcpkg-version.outputs.commit }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: 获取vcpkg提交哈希
+        id: vcpkg-version
+        run: |
+          response=$(curl -s "https://api.github.com/repos/microsoft/vcpkg/git/ref/tags/${{ env.VCPKG_TAG }}")
+          commit=$(echo "$response" | jq -r '.object.sha')
+          echo "commit=$commit" >> $GITHUB_OUTPUT
+          echo "Resolved vcpkg ${{ env.VCPKG_TAG }} => $commit"
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: C:\vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-
-      - name: Generate vcpkg cache key
-        id: vcpkg-cache
-        run: echo "cache-key=vcpkg-${{ runner.os }}-${{ env.VCPKG_COMMIT_ID }}" >> $GITHUB_OUTPUT
-
-  build-for-windows-flutter:
-    needs: [setup-dependencies]
+  # Windows构建阶段
+  build-windows:
+    needs: resolve-versions
     runs-on: windows-2022
     strategy:
       matrix:
-        arch: [x86_64]
-        build_type: [hwcodec,flutter,vram]
-    
-    env:
-      RUSTFLAGS: "-C target-feature=+crt-static"
-      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+        arch: [x86_64, arm64]
+        build_type: [ "hwcodec", "flutter", "vram" ]
+        exclude: 
+          - arch: arm64
+            build_type: hwcodec  # ARM64暂不支持硬件编码
 
     steps:
-      - name: Checkout code
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Restore vcpkg cache
-        uses: actions/cache@v3
+      - name: 初始化vcpkg
+        uses: lukka/run-vcpkg@v11
         with:
-          path: C:\vcpkg
-          key: ${{ needs.setup-dependencies.outputs.vcpkg_cache_key }}
+          vcpkgDirectory: ${{ env.VCPKG_ROOT }}
+          vcpkgGitCommitId: ${{ needs.resolve-versions.outputs.vcpkg_commit }}
 
-      - name: Install Rust
+      - name: 配置构建环境
+        shell: pwsh
+        run: |
+          # 设置VC++环境
+          $vsPath = & "${env:ProgramFiles}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -DevCmdArguments '-arch=x64'
+
+          # 环境变量生效验证
+          cl.exe /?
+
+      - name: 安装Rust工具链
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
-      - name: Install Flutter
+      - name: 安装Flutter SDK
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
+          architecture: ${{ matrix.arch == 'arm64' && 'windows_arm64' || 'windows_x64' }}
 
-      - name: Install Build Dependencies
-        shell: powershell
+      - name: 构建依赖安装
+        shell: pwsh
         run: |
           & "$env:VCPKG_ROOT\vcpkg" install \
-            libvpx[core] \
-            libyuv[core] \
-            opus[core] \
-            --triplet $env:VCPKG_DEFAULT_TRIPLET
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+            libvpx[core]:${{ matrix.arch == 'arm64' && 'arm64-windows' || 'x64-windows' }} \
+            libyuv[core]:${{ matrix.arch == 'arm64' && 'arm64-windows' || 'x64-windows' }} \
+            --triplet ${{ matrix.arch == 'arm64' && 'arm64-windows-static' || 'x64-windows-static' }}
 
-      - name: Build RustDesk
-        shell: powershell
+      - name: 执行构建
+        shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "fat"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
         run: |
+          # 严格错误检查模式
           $ErrorActionPreference = "Stop"
-          
-          # 更新依赖锁定
+
+          # 更新依赖锁
           cargo update -p magnum-opus
-          
-          # 构建核心库
-          cargo build --release --features ${{ matrix.build_type }}
-          
-          # 构建Flutter部分
-          python .\build.py `
-            --features ${{ matrix.build_type }} `
-            --portable `
-            --skip-portable-pack `
-            --vcpkg-root "$env:VCPKG_ROOT"
-          
-          # 验证输出文件
-          if (-not (Test-Path ".\target\release\rustdesk.exe")) {
-            Write-Error "Build failed: rustdesk.exe not found"
-            exit 1
+
+          # 跨平台构建参数
+          $target = "${{ matrix.arch }}-pc-windows-msvc"
+          $features = "${{ matrix.build_type }}"
+
+          # 核心库构建
+          cargo build --release --target $target --features $features
+          if (-not (Test-Path "target/$target/release/magnum_opus.rlib")) {
+              throw "Core library build failed"
           }
 
-      - name: Package Artifacts
-        shell: powershell
-        run: |
-          $version = (Get-Item ".\target\release\rustdesk.exe").VersionInfo.FileVersion
-          Compress-Archive -Path ".\target\release\*" -DestinationPath "rustdesk-$version-${{ matrix.arch }}.zip"
+          # Flutter集成构建
+          python .\build.py `
+            --target-os windows `
+            --arch ${{ matrix.arch }} `
+            --features $features `
+            --vcpkg-root "$env:VCPKG_ROOT"
+          
+          # 产物验证
+          $exePath = "build/windows/${{ matrix.arch }}/runner/rustdesk.exe"
+          if (-not (Test-Path $exePath)) {
+              throw "Final executable missing: $exePath"
+          }
 
-      - name: Upload Artifacts
+      - name: 打包发布产物
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-windows
+          name: rustdesk-${{ matrix.arch }}-${{ matrix.build_type }}
           path: |
-            .\rustdesk-*.zip
-            .\target\release\rustdesk.exe
+            build/windows/${{ matrix.arch }}/**/*.exe
+            build/windows/${{ matrix.arch }}/**/*.dll
+          retention-days: 7
