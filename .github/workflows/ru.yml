@@ -1,85 +1,43 @@
-name: RustDesk CI/CD (最终修正版)
+name: RustDesk CI/CD (手动触发版)
 
 on:
+  # 手动触发配置
   workflow_dispatch:
     inputs:
-      clean_build:
-        description: 'Perform full clean rebuild'
+      build_type:
+        description: '选择构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+      clean_cache:
+        description: '清除构建缓存'
         type: boolean
         default: false
 
-env:
-  ROOT_DIR: "${{ github.workspace }}"
-  SOURCE_DIR: "${{ github.workspace }}\src"
-  VCPKG_ROOT: "C:\vcpkg"
-  CARGO_HOME: "${{ github.workspace }}\.cargo"
+  # 自动触发配置（可选）
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  setup:
-    name: 环境配置
+  build:
+    name: 构建项目
     runs-on: windows-latest
     steps:
-    - name: 初始化路径
-      shell: powershell
-      run: |
-        # 强制设置路径格式
-        $sourcePath = [System.IO.Path]::GetFullPath("$env:SOURCE_DIR")
-        if (-not (Test-Path $sourcePath)) {
-            New-Item -Path $sourcePath -ItemType Directory -Force
-        }
-        Write-Output "##[info]Workspace validated: $sourcePath"
-
-        # 设置全局环境变量
-        Add-Content -Path $env:GITHUB_ENV -Value "SOURCE_DIR=$sourcePath"
-
     - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: "${{ env.SOURCE_DIR }}"
-        clean: true
-        fetch-depth: 0
-
-  build:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-    - name: 验证工作目录
-      shell: powershell
-      run: |
-        # 获取绝对路径
-        $buildDir = [System.IO.Path]::GetFullPath("$env:SOURCE_DIR")
-        if (-not (Test-Path $buildDir)) {
-            Write-Output "::error::Invalid working directory: $buildDir"
-            exit 1
-        }
-
-        # 显式设置工作目录
-        Set-Location -Path $buildDir
-        Write-Output "##[info]Current directory: $pwd"
 
     - name: 构建项目
-      shell: powershell
-      run: |
-        # 设置环境变量
-        $env:Path += ";$env:VCPKG_ROOT"
-        $env:CARGO_TARGET_DIR = "$env:ROOT_DIR\target"
-
-        # 使用绝对路径构建
-        cargo build --release --manifest-path "$pwd\Cargo.toml"
-
-        # 验证输出
-        $exePath = "$env:CARGO_TARGET_DIR\release\rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-            Write-Output "::error::Build artifact missing: $exePath"
-            Get-ChildItem "$env:CARGO_TARGET_DIR\release"
-            exit 1
-        }
+      run: cargo build --${{ github.event.inputs.build_type }}
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
-        name: release-bin
-        path: |
-          ${{ env.CARGO_TARGET_DIR }}\release\rustdesk.exe
-          ${{ env.CARGO_TARGET_DIR }}\release\*.dll
+        name: rustdesk-bin
+        path: target/${{ github.event.inputs.build_type }}/rustdesk.exe
