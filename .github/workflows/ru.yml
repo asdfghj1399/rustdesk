@@ -1,4 +1,4 @@
-name: RustDesk CI/CD (终极修复版)
+name: RustDesk CI/CD (最终修正版)
 
 on:
   workflow_dispatch:
@@ -9,101 +9,77 @@ on:
         default: false
 
 env:
-  WORKSPACE: "${{ github.workspace }}\\src"
-  VCPKG_ROOT: "C:\\vcpkg"
-  CARGO_HOME: "${{ github.workspace }}\\.cargo"
+  ROOT_DIR: "${{ github.workspace }}"
+  SOURCE_DIR: "${{ github.workspace }}\src"
+  VCPKG_ROOT: "C:\vcpkg"
+  CARGO_HOME: "${{ github.workspace }}\.cargo"
 
 jobs:
   setup:
-    name: Environment Setup
+    name: 环境配置
     runs-on: windows-latest
     steps:
-    - name: Initialize Directories
+    - name: 初始化路径
       shell: powershell
       run: |
-        # 强制设置UTF-8编码环境
-        $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        chcp 65001 | Out-Null
-
-        # 创建规范化路径
-        $workspace = "$env:WORKSPACE" -replace '\\\\', '\'
-        if (-not (Test-Path $workspace)) {
-            New-Item -Path $workspace -ItemType Directory -Force | Out-Null
+        # 强制设置路径格式
+        $sourcePath = [System.IO.Path]::GetFullPath("$env:SOURCE_DIR")
+        if (-not (Test-Path $sourcePath)) {
+            New-Item -Path $sourcePath -ItemType Directory -Force
         }
-        Write-Output "##[info]Workspace validated: $workspace"
+        Write-Output "##[info]Workspace validated: $sourcePath"
 
-    - name: Checkout Code
+        # 设置全局环境变量
+        Add-Content -Path $env:GITHUB_ENV -Value "SOURCE_DIR=$sourcePath"
+
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        path: "${{ env.WORKSPACE }}"
+        path: "${{ env.SOURCE_DIR }}"
         clean: true
         fetch-depth: 0
-
-    - name: Set File Permissions
-      shell: powershell
-      run: |
-        # 获取绝对路径
-        $fullPath = [System.IO.Path]::GetFullPath("$env:WORKSPACE")
-        
-        # 递归设置权限
-        icacls "$fullPath" /grant "*S-1-1-0:(OI)(CI)F" /T /C /Q
-        
-        # 验证权限设置
-        $acl = Get-ACL "$fullPath"
-        Write-Output "##[info]Final permissions for $fullPath"
-        $acl.Access | Format-Table IdentityReference, FileSystemRights -AutoSize
 
   build:
     needs: setup
     runs-on: windows-latest
     steps:
-    - name: Build Preparation
-      shell: powershell
-      working-directory: "${{ env.WORKSPACE }}"
-      run: |
-        # 设置环境变量
-        $env:Path += ";$env:VCPKG_ROOT;"
-        $env:CARGO_TARGET_DIR = "${{ github.workspace }}\\target"
-
-        # 显示关键路径
-        Write-Output "##[group]Build Environment"
-        Write-Output "Workspace: $pwd"
-        Write-Output "VCPKG_ROOT: $env:VCPKG_ROOT"
-        Write-Output "CARGO_HOME: $env:CARGO_HOME"
-        Write-Output "##[endgroup]"
-
-    - name: Build Project
+    - name: 验证工作目录
       shell: powershell
       run: |
-        # 使用绝对路径构建
-        cargo build --release --manifest-path "$env:WORKSPACE\\Cargo.toml"
-        
-        # 验证产物存在性
-        $exePath = "$env:CARGO_TARGET_DIR\\release\\rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-            Write-Output "::error::Build failed - Missing $exePath"
-            Get-ChildItem "$env:CARGO_TARGET_DIR\\release"
+        # 获取绝对路径
+        $buildDir = [System.IO.Path]::GetFullPath("$env:SOURCE_DIR")
+        if (-not (Test-Path $buildDir)) {
+            Write-Output "::error::Invalid working directory: $buildDir"
             exit 1
         }
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-binaries
-        path: |
-          ${{ env.CARGO_TARGET_DIR }}\\release\\rustdesk.exe
-          ${{ env.CARGO_TARGET_DIR }}\\release\\*.dll
-        retention-days: 7
+        # 显式设置工作目录
+        Set-Location -Path $buildDir
+        Write-Output "##[info]Current directory: $pwd"
 
-  post-build:
-    name: Cleanup
-    needs: build
-    if: always()
-    runs-on: windows-latest
-    steps:
-    - name: Remove Temporary Files
+    - name: 构建项目
       shell: powershell
       run: |
-        Remove-Item -Path "$env:WORKSPACE\\target" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path "$env:CARGO_HOME\\registry" -Recurse -Force -ErrorAction SilentlyContinue
+        # 设置环境变量
+        $env:Path += ";$env:VCPKG_ROOT"
+        $env:CARGO_TARGET_DIR = "$env:ROOT_DIR\target"
+
+        # 使用绝对路径构建
+        cargo build --release --manifest-path "$pwd\Cargo.toml"
+
+        # 验证输出
+        $exePath = "$env:CARGO_TARGET_DIR\release\rustdesk.exe"
+        if (-not (Test-Path $exePath)) {
+            Write-Output "::error::Build artifact missing: $exePath"
+            Get-ChildItem "$env:CARGO_TARGET_DIR\release"
+            exit 1
+        }
+
+    - name: 上传产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-bin
+        path: |
+          ${{ env.CARGO_TARGET_DIR }}\release\rustdesk.exe
+          ${{ env.CARGO_TARGET_DIR }}\release\*.dll
