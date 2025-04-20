@@ -1,23 +1,66 @@
+name: RustDesk CI/CD (终极修复版)
 
 on:
-  # 手动触发配置
   workflow_dispatch:
     inputs:
       build-mode:
-        description: '选择构建模式'
-        required: true
+        description: 'Build Type'
         type: choice
-        options:
-          - debug
-          - release
+        options: [debug, release]
         default: 'release'
-      clean-cache:
-        description: '清除构建缓存'
-        type: boolean
-        default: false
 
-  # 自动触发配置
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+env:
+  WORKSPACE: ${{ github.workspace }}\src
+
+jobs:
+  setup:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        path: src
+
+    - name: Validate Paths
+      shell: powershell
+      run: |
+        # 强制设置编码为UTF-8 BOM
+        $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        chcp 65001 | Out-Null
+
+        # 路径标准化处理
+        $workspace = "$env:WORKSPACE" -replace '/', '\'
+        if (-not (Test-Path $workspace)) {
+            New-Item -Path $workspace -ItemType Directory -Force
+        }
+
+        # ASCII-only输出
+        Write-Output "##[group]Path Verification"
+        Write-Output "Workspace Path: $workspace"
+        Write-Output "Current Directory: $(Get-Location)"
+        Write-Output "##[endgroup]"
+
+  build:
+    needs: setup
+    runs-on: windows-latest
+    steps:
+    - name: Build Setup
+      shell: powershell
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        # 安全路径验证
+        if (-not (Test-Path .)) {
+            Write-Output "::error::Workspace path not found: $pwd"
+            exit 1
+        }
+
+        # 使用ASCII字符显示信息
+        Write-Output "Build starting in: $(Get-Location)"
+        cargo build --${{ inputs.build-mode }}
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: ${{ env.WORKSPACE }}/target/${{ inputs.build-mode }}/*.exe
