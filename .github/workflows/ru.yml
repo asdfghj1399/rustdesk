@@ -1,33 +1,32 @@
-name: RustDesk Windows Build
+name: RustDesk CI/CD (终极修复版)
 
 on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: "Perform full clean rebuild"
+        description: '执行完全清理重建'
         type: boolean
         default: false
 
 env:
-  VCPKG_ROOT: "C:\\vcpkg"
-  BUILD_DIR: "C:\\build_output"
-  RUST_BACKTRACE: "full"
+  BUILD_MODE: release
+  WORKSPACE: ${{ github.workspace }}\src
+  VCPKG_ROOT: C:\vcpkg
+  RUST_TOOLCHAIN: 1.75.0
 
 jobs:
-  build:
+  setup:
+    name: 环境初始化
     runs-on: windows-latest
-    timeout-minutes: 90
-
     steps:
-    - name: Clean workspace (if needed)
+    - name: 清理工作区
       if: ${{ inputs.clean_build }}
       shell: powershell
       run: |
         Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:BUILD_DIR" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "target" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:WORKSPACE" -ErrorAction SilentlyContinue
 
-    - name: Checkout code (with safe permissions)
+    - name: 检出代码
       uses: actions/checkout@v4
       with:
         submodules: recursive
@@ -35,65 +34,92 @@ jobs:
         clean: true
         fetch-depth: 0
 
-    - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@v1
-      with:
-        toolchain: stable
-        targets: x86_64-pc-windows-msvc
-        components: rustfmt, clippy
+    - name: 修复子模块权限
+      shell: powershell
+      working-directory: $env:WORKSPACE
+      run: |
+        # 递归设置文件权限
+        icacls . /grant Everyone:(OI)(CI)F /T
+        # 重置文件属性
+        Get-ChildItem -Recurse | % { $_.Attributes = "Normal" }
 
-    - name: Install build dependencies
+  build-deps:
+    name: 安装依赖
+    needs: setup
+    runs-on: windows-latest
+    steps:
+    - name: 安装系统工具
       shell: powershell
       run: |
-        # 安装必要系统工具
         choco install -y cmake llvm nasm python --version=3.9.13
         refreshenv
 
-        # 设置vcpkg
-        if (-not (Test-Path "$env:VCPKG_ROOT")) {
-          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
-          cd "$env:VCPKG_ROOT"
-          .\bootstrap-vcpkg.bat -disableMetrics
-        }
-
-        # 安装依赖库
-        & "$env:VCPKG_ROOT\vcpkg" install @(
-          "libvpx[core]",
-          "libyuv[core]",
-          "openssl[core]"
-        ) --triplet x64-windows --clean-after-build
-
-    - name: Build RustDesk (with permission fix)
+    - name: 配置vcpkg
       shell: powershell
       run: |
-        # 修复权限问题
-        $ErrorActionPreference = "Stop"
-        $buildType = "release"
-        $env:CARGO_TARGET_DIR = "$env:BUILD_DIR"
-
-        # 显式设置工作目录
-        Set-Location -Path "$env:GITHUB_WORKSPACE\src"
-
-        # 修复文件权限
-        Get-ChildItem -Recurse | ForEach-Object {
-          $_.Attributes = "Normal"
+        if (-not (Test-Path $env:VCPKG_ROOT)) {
+          git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
         }
+        & "$env:VCPKG_ROOT\vcpkg" install libvpx libyuv openssl --triplet x64-windows
 
-        # 构建项目
-        cargo build --$buildType --target x86_64-pc-windows-msvc -v
+  build:
+    name: 构建项目
+    needs: build-deps
+    runs-on: windows-latest
+    steps:
+    - name: 配置Rust环境
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
+        target: x86_64-pc-windows-msvc
+        override: true
 
-        # 验证输出
-        $exePath = "$env:BUILD_DIR\x86_64-pc-windows-msvc\$buildType\rustdesk.exe"
-        if (-not (Test-Path $exePath)) {
-          Write-Output "::error::Build failed - Missing executable"
+    - name: 构建核心库
+      shell: powershell
+      working-directory: $env:WORKSPACE
+      env:
+        VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        cargo build --${{ env.BUILD_MODE }} --manifest-path libs/hbb_common/Cargo.toml
+
+    - name: 构建主程序
+      shell: powershell
+      working-directory: $env:WORKSPACE
+      run: |
+        cargo build --${{ env.BUILD_MODE }} --bin rustdesk
+        if (-not (Test-Path "target\$env:BUILD_MODE\rustdesk.exe")) {
+          Write-Output "::error::可执行文件未生成"
+          Get-ChildItem target\$env:BUILD_MODE
           exit 1
         }
 
-    - name: Upload artifacts
+  artifacts:
+    name: 产物打包
+    needs: build
+    runs-on: windows-latest
+    steps:
+    - name: 上传可执行文件
       uses: actions/upload-artifact@v4
       with:
-        name: rustdesk-build
+        name: rustdesk-bin
         path: |
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/release/*.exe
-          ${{ env.BUILD_DIR }}/x86_64-pc-windows-msvc/release/*.dll
+          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\rustdesk.exe
+          ${{ env.WORKSPACE }}\target\${{ env.BUILD_MODE }}\*.dll
         retention-days: 7
+
+  post-build:
+    name: 清理报告
+    needs: artifacts
+    if: always()
+    runs-on: windows-latest
+    steps:
+    - name: 生成构建摘要
+      shell: powershell
+      run: |
+        Write-Output "##[group]构建摘要"
+        Write-Output "构建模式: ${{ env.BUILD_MODE }}"
+        Write-Output "构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Output "工作目录: $env:WORKSPACE"
+        Write-Output "##[endgroup]"
