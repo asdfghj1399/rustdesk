@@ -1,56 +1,39 @@
-name: CI Build
+name: Clean Workspace
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-
-env:
-  VCPKG_COMMIT: "d619c9be4bcd170f0f7d6b705a72aadf8d5b0aab" # 有效的40位commit hash
-  VCPKG_ROOT: C:\vcpkg
 
 jobs:
-  setup-vcpkg:
+  deep-clean:
     runs-on: windows-2022
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ env.VCPKG_ROOT }}
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }} # 直接使用完整SHA
-          setupOnly: true
-
-  build:
-    needs: setup-vcpkg
-    runs-on: windows-2022
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Validate vcpkg
+      - name: 停止相关进程
         shell: pwsh
         run: |
-          # 验证commit hash格式
-          if (-not ($env:VCPKG_COMMIT -match '^[0-9a-f]{40}$')) {
-              Write-Error "Invalid vcpkg commit format: $env:VCPKG_COMMIT"
-              exit 1
-          }
-          
-          # 验证vcpkg安装
-          if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
-              Write-Error "vcpkg repository not initialized"
-              exit 1
-          }
+          Get-Process | Where-Object { 
+              $_.Path -like "*vcpkg*" -or 
+              $_.Path -like "*cargo*"
+          } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-      - name: Build with vcpkg
+      - name: 清理系统级目录
         shell: pwsh
         run: |
-          # 显示vcpkg版本信息
-          & "$env:VCPKG_ROOT\vcpkg" version --debug
+          $targets = @(
+              "C:\vcpkg",
+              "${env:ProgramFiles}\vcpkg",
+              "${env:LOCALAPPDATA}\vcpkg",
+              "${env:TEMP}\vcpkg"
+          )
           
-          # 后续构建命令...
+          $targets | ForEach-Object {
+              if (Test-Path $_) {
+                  Write-Output "Removing $_"
+                  Remove-Item $_ -Recurse -Force -ErrorAction Continue
+              }
+          }
+
+      - name: 重置权限
+        if: always()
+        shell: pwsh
+        run: |
+          icacls "C:\" /reset /T /C /L /Q
