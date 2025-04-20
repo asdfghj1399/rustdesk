@@ -1,68 +1,53 @@
-name: RustDesk CI/CD (VCPKG修复版)
-
-on:
-  workflow_dispatch:
-    inputs:
-      build_type:
-        description: '选择构建类型'
-        type: choice
-        options: [debug, release]
-        default: 'release'
-
-env:
-  VCPKG_ROOT: "C:\\vcpkg"  # 显式定义环境变量
-  VCPKG_DEFAULT_TRIPLET: "x64-windows"
-
 jobs:
-  setup:
-    name: 环境准备
-    runs-on: windows-latest
+  build-for-windows-flutter:
+    name: ${{ matrix.job.target }}
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: x86_64-pc-windows-msvc,
+              arch: x86_64,
+              vcpkg-triplet: x64-windows-static,
+              build_type: "hwcodec,flutter,vram"
+            }
+
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+      VCPKG_ROOT: C:\vcpkg
+
     steps:
-    - name: 初始化路径
-      shell: powershell
-      run: |
-        # 强制创建目录
-        $vcpkgPath = "$env:VCPKG_ROOT"
-        if (-not (Test-Path $vcpkgPath)) {
-            New-Item -Path $vcpkgPath -ItemType Directory -Force | Out-Null
-        }
-        Write-Output "VCPKG路径已创建：$vcpkgPath"
+      - name: 初始化环境变量
+        shell: powershell
+        run: |
+          [System.Environment]::SetEnvironmentVariable('VCPKG_ROOT', 'C:\vcpkg', 'Machine')
+          $env:Path += ";C:\vcpkg"
 
-    - name: 安装VCPKG
-      shell: powershell
-      run: |
-        # 验证环境变量存在性
-        if (-not $env:VCPKG_ROOT) {
-            Write-Output "::error::VCPKG_ROOT环境变量未定义！"
-            exit 1
-        }
+      - uses: actions/cache@v3
+        name: 缓存vcpkg
+        with:
+          path: C:\vcpkg
+          key: ${{ runner.os }}-vcpkg-${{ env.VCPKG_COMMIT_ID }}
 
-        # 使用标准化路径
-        $vcpkgPath = Convert-Path $env:VCPKG_ROOT
-        Set-Location $vcpkgPath
-        git clone https://github.com/microsoft/vcpkg . -b 2024.04.12
-        .\bootstrap-vcpkg.bat -disableMetrics
+      - name: 安装vcpkg依赖
+        shell: powershell
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg" install \
+            libvpx[core] \
+            libyuv[core] \
+            --triplet $env:VCPKG_DEFAULT_TRIPLET
+          if (-not $?) { exit 1 }
 
-        # 持久化环境变量
-        echo "VCPKG_ROOT=$vcpkgPath" >> $env:GITHUB_ENV
-
-  build:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-    - name: 验证环境变量
-      shell: powershell
-      run: |
-        # 双重验证机制
-        if (-not (Test-Path $env:VCPKG_ROOT)) {
-            Write-Output "::error::VCPKG_ROOT路径验证失败：$env:VCPKG_ROOT"
-            exit 1
-        }
-        Write-Output "VCPKG有效路径：$(Convert-Path $env:VCPKG_ROOT)"
-
-    - name: 构建项目
-      shell: powershell
-      env:
-        VCPKGRS_DYNAMIC: 1  # 启用动态查找
-      run: |
-        cargo build --${{ inputs.build_type }} -v
+      - name: 构建RustDesk
+        shell: powershell
+        run: |
+          # 强制刷新依赖关系
+          cargo update -p magnum-opus
+          
+          python .\build.py --features ${{ matrix.job.build_type }} `
+            --portable `
+            --skip-portable-pack `
+            --vcpkg-root "$env:VCPKG_ROOT"
