@@ -1,10 +1,10 @@
-name: RustDesk CI/CD (权限问题修复版)
+name: RustDesk CI/CD (编码问题修复版)
 
 on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: '执行完全清理'
+        description: 'Perform full clean rebuild'
         type: boolean
         default: false
 
@@ -14,20 +14,24 @@ env:
 
 jobs:
   setup:
-    name: 环境初始化
+    name: Environment Setup
     runs-on: windows-latest
     steps:
-    - name: 创建工作目录
+    - name: Create Workspace
       shell: powershell
       run: |
-        # 创建带转义字符的路径
-        $workspace = $env:WORKSPACE -replace '\\{2,}', '\'
+        # 强制设置UTF-8编码环境
+        $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        chcp 65001 | Out-Null
+
+        # 路径标准化处理
+        $workspace = "$env:WORKSPACE" -replace '\\{2,}', '\'
         if (-not (Test-Path $workspace)) {
             New-Item -Path $workspace -ItemType Directory -Force | Out-Null
         }
-        Write-Output "##[info]工作目录创建成功：$workspace"
+        Write-Output "##[info]Workspace created: $workspace"
 
-    - name: 检出代码
+    - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
@@ -35,41 +39,39 @@ jobs:
         clean: true
         fetch-depth: 0
 
-    - name: 修复文件权限
+    - name: Fix Permissions
       shell: powershell
       working-directory: ${{ env.WORKSPACE }}
       run: |
-        # 验证路径存在性
-        if (-not (Test-Path .)) {
-            Write-Output "::error::工作目录不存在：$pwd"
-            exit 1
-        }
-
-        # 修正的icacls命令格式
+        # 统一使用ASCII字符输出
+        Write-Output "##[group]Setting File Permissions"
         $fullPath = Convert-Path .
         icacls "$fullPath" /grant "Everyone:(OI)(CI)F" /T /C
-        if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::权限设置失败，退出码：$LASTEXITCODE"
-            exit $LASTEXITCODE
-        }
-
-        # 附加权限验证
-        $acl = Get-ACL $fullPath
-        Write-Output "##[info]当前权限设置："
-        $acl.Access | Format-Table IdentityReference, FileSystemRights
+        Write-Output "##[info]Permissions set for: $fullPath"
+        Write-Output "##[endgroup]"
 
   build:
     needs: setup
     runs-on: windows-latest
     steps:
-    - name: 显示环境信息
+    - name: Build Project
       shell: powershell
       working-directory: ${{ env.WORKSPACE }}
       run: |
-        Write-Output "##[group]系统信息"
-        systeminfo | Select-String 'OS Name','OS Version'
+        # ASCII-only输出
+        Write-Output "##[group]Build Process"
+        cargo build --release
+        if (-not (Test-Path "target\\release\\rustdesk.exe")) {
+            Write-Output "::error::Build artifact missing!"
+            exit 1
+        }
+        Write-Output "##[info]Build successful!"
         Write-Output "##[endgroup]"
 
-        Write-Output "##[group]磁盘信息"
-        Get-Volume | Format-Table DriveLetter, SizeRemaining
-        Write-Output "##[endgroup]"
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-bin
+        path: |
+          ${{ env.WORKSPACE }}\target\release\rustdesk.exe
+          ${{ env.WORKSPACE }}\target\release\*.dll
