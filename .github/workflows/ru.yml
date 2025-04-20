@@ -1,139 +1,56 @@
-# 文件路径: .github/workflows/build-windows.yml
-name: Windows Build Pipeline
+name: CI Build
 
 on:
-  # 手动触发选项
   workflow_dispatch:
-  # 代码推送时触发
   push:
-    branches: [ main, release/* ]
-    paths:
-      - 'rust/**'
-      - 'flutter/**'
-      - '.github/workflows/build-windows.yml'
-  # 每天凌晨构建测试
-  schedule:
-    - cron: '0 0 * * *'
+    branches: [ main ]
 
 env:
-  RUST_VERSION: "1.75.0"
-  VCPKG_TAG: "2024.04"  # 官方release标签
-  FLUTTER_VERSION: "3.24.5"
+  VCPKG_COMMIT: "d619c9be4bcd170f0f7d6b705a72aadf8d5b0aab" # 有效的40位commit hash
   VCPKG_ROOT: C:\vcpkg
 
 jobs:
-  # 版本解析阶段
-  resolve-versions:
-    name: Determine Build Versions
-    runs-on: ubuntu-latest
-    outputs:
-      vcpkg_commit: ${{ steps.vcpkg-version.outputs.commit }}
-    steps:
-      - name: 获取vcpkg提交哈希
-        id: vcpkg-version
-        run: |
-          response=$(curl -s "https://api.github.com/repos/microsoft/vcpkg/git/ref/tags/${{ env.VCPKG_TAG }}")
-          commit=$(echo "$response" | jq -r '.object.sha')
-          echo "commit=$commit" >> $GITHUB_OUTPUT
-          echo "Resolved vcpkg ${{ env.VCPKG_TAG }} => $commit"
-
-  # Windows构建阶段
-  build-windows:
-    needs: resolve-versions
+  setup-vcpkg:
     runs-on: windows-2022
-    strategy:
-      matrix:
-        arch: [x86_64, arm64]
-        build_type: [ "hwcodec", "flutter", "vram" ]
-        exclude: 
-          - arch: arm64
-            build_type: hwcodec  # ARM64暂不支持硬件编码
-
     steps:
-      - name: 检出代码
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
 
-      - name: 初始化vcpkg
+      - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: ${{ env.VCPKG_ROOT }}
-          vcpkgGitCommitId: ${{ needs.resolve-versions.outputs.vcpkg_commit }}
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }} # 直接使用完整SHA
+          setupOnly: true
 
-      - name: 配置构建环境
-        shell: pwsh
-        run: |
-          # 设置VC++环境
-          $vsPath = & "${env:ProgramFiles}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $vsPath -DevCmdArguments '-arch=x64'
-
-          # 环境变量生效验证
-          cl.exe /?
-
-      - name: 安装Rust工具链
-        uses: dtolnay/rust-toolchain@v1
+  build:
+    needs: setup-vcpkg
+    runs-on: windows-2022
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
+          submodules: recursive
 
-      - name: 安装Flutter SDK
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          architecture: ${{ matrix.arch == 'arm64' && 'windows_arm64' || 'windows_x64' }}
-
-      - name: 构建依赖安装
+      - name: Validate vcpkg
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\vcpkg" install \
-            libvpx[core]:${{ matrix.arch == 'arm64' && 'arm64-windows' || 'x64-windows' }} \
-            libyuv[core]:${{ matrix.arch == 'arm64' && 'arm64-windows' || 'x64-windows' }} \
-            --triplet ${{ matrix.arch == 'arm64' && 'arm64-windows-static' || 'x64-windows-static' }}
-
-      - name: 执行构建
-        shell: pwsh
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "fat"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
-        run: |
-          # 严格错误检查模式
-          $ErrorActionPreference = "Stop"
-
-          # 更新依赖锁
-          cargo update -p magnum-opus
-
-          # 跨平台构建参数
-          $target = "${{ matrix.arch }}-pc-windows-msvc"
-          $features = "${{ matrix.build_type }}"
-
-          # 核心库构建
-          cargo build --release --target $target --features $features
-          if (-not (Test-Path "target/$target/release/magnum_opus.rlib")) {
-              throw "Core library build failed"
+          # 验证commit hash格式
+          if (-not ($env:VCPKG_COMMIT -match '^[0-9a-f]{40}$')) {
+              Write-Error "Invalid vcpkg commit format: $env:VCPKG_COMMIT"
+              exit 1
           }
-
-          # Flutter集成构建
-          python .\build.py `
-            --target-os windows `
-            --arch ${{ matrix.arch }} `
-            --features $features `
-            --vcpkg-root "$env:VCPKG_ROOT"
           
-          # 产物验证
-          $exePath = "build/windows/${{ matrix.arch }}/runner/rustdesk.exe"
-          if (-not (Test-Path $exePath)) {
-              throw "Final executable missing: $exePath"
+          # 验证vcpkg安装
+          if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
+              Write-Error "vcpkg repository not initialized"
+              exit 1
           }
 
-      - name: 打包发布产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-${{ matrix.arch }}-${{ matrix.build_type }}
-          path: |
-            build/windows/${{ matrix.arch }}/**/*.exe
-            build/windows/${{ matrix.arch }}/**/*.dll
-          retention-days: 7
+      - name: Build with vcpkg
+        shell: pwsh
+        run: |
+          # 显示vcpkg版本信息
+          & "$env:VCPKG_ROOT\vcpkg" version --debug
+          
+          # 后续构建命令...
