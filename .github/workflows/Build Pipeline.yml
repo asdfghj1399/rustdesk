@@ -1,70 +1,50 @@
-name: Secure Chocolatey Setup
+name: Chocolatey Safe Install
 
 on:
   workflow_dispatch:
 
-env:
-  TARGET_CHOCO_VERSION: 2.4.3
-
 jobs:
-  chocolatey-management:
+  setup-chocolatey:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: 初始化环境
+      - name: 安全安装Chocolatey
         shell: pwsh
         run: |
-          # 清理旧版本残留
-          $chocoPaths = @(
-              "${env:ProgramData}\chocolatey",
-              "${env:LOCALAPPDATA}\chocolatey"
-          )
-          $chocoPaths | Where-Object { Test-Path $_ } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # 环境初始化
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
 
-          # 重置执行策略
-          Set-ExecutionPolicy Unrestricted -Scope Process -Force
-
-      - name: 智能部署Chocolatey
-        shell: pwsh
-        run: |
+          # 分阶段安装函数
           function Install-Chocolatey {
-              param([string]$Version)
+              param([string]$version)
               
-              $installScript = {
-                  iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-                  if (-not (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe")) {
-                      throw "安装失败"
+              # 首次安装
+              if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
+                  Write-Output "执行全新安装..."
+                  $installScript = {
+                      iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+                      if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
+                          throw "安装失败：无法找到choco.exe"
+                      }
                   }
-              }
-
-              try {
-                  if ($Version) {
-                      Write-Output "定向安装v$Version..."
-                      choco install chocolatey --version=$Version -y --force
-                  }
-                  else {
-                      Write-Output "执行标准安装..."
-                      & $installScript
-                  }
-              }
-              catch {
-                  Write-Warning "主安装路径失败，尝试备用方案..."
                   & $installScript
               }
+
+              # 版本管理
+              $currentVersion = try { (choco --version 2>$null) } catch { $null }
+              if ($currentVersion -and [version]$currentVersion -ne [version]$version) {
+                  Write-Output "当前版本 $currentVersion → 目标版本 $version"
+                  choco upgrade chocolatey --version=$version -y --force --no-progress
+              }
+
+              # 环境刷新
+              $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ";" + [System.Environment]::GetEnvironmentVariable('Path','User')
           }
 
-          # 版本检测逻辑
-          $currentVer = [version]((choco --version 2>$null) -replace '[^\d\.]')
-          $targetVer = [version]$env:TARGET_CHOCO_VERSION
+          # 执行安装流程
+          Install-Chocolatey -version "2.4.3"
 
-          if (-not $currentVer) {
-              Install-Chocolatey -Version $env:TARGET_CHOCO_VERSION
-          }
-          elseif ($currentVer -ne $targetVer) {
-              Write-Output "当前版本 $currentVer → 目标版本 $targetVer"
-              choco upgrade chocolatey --version=$env:TARGET_CHOCO_VERSION -y --allow-downgrade
-          }
-
-          # 最终验证
+          # 验证安装结果
           choco --version
-          choco list -lo
+          if (-not $?) { exit 1 }
