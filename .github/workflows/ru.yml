@@ -1,4 +1,4 @@
-name: RustDesk CI/CD
+name: RustDesk CI/CD (VCPKG修复版)
 
 on:
   workflow_dispatch:
@@ -21,17 +21,27 @@ jobs:
     - name: 安装VCPKG
       shell: powershell
       run: |
-        git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+        # 清理旧安装
+        if (Test-Path "$env:VCPKG_ROOT") {
+            Remove-Item -Recurse -Force "$env:VCPKG_ROOT"
+        }
+        
+        # 克隆并初始化vcpkg
+        git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
         & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-        & "$env:VCPKG_ROOT\vcpkg" integrate install
 
     - name: 安装依赖库
       shell: powershell
       run: |
-        & "$env:VCPKG_ROOT\vcpkg" install \
-          libvpx[core]:$env:VCPKG_DEFAULT_TRIPLET \
-          libyuv[core]:$env:VCPKG_DEFAULT_TRIPLET \
-          openssl[core]:$env:VCPKG_DEFAULT_TRIPLET
+        # 正确安装命令格式
+        & "$env:VCPKG_ROOT\vcpkg" install `
+          libvpx[core] `
+          libyuv[core] `
+          openssl[core] `
+          --triplet $env:VCPKG_DEFAULT_TRIPLET
+        
+        # 验证安装结果
+        & "$env:VCPKG_ROOT\vcpkg" list --triplet $env:VCPKG_DEFAULT_TRIPLET
 
   build:
     needs: setup
@@ -42,18 +52,26 @@ jobs:
       with:
         submodules: recursive
 
+    - name: 配置构建环境
+      shell: powershell
+      run: |
+        # 设置vcpkg集成
+        & "$env:VCPKG_ROOT\vcpkg" integrate install
+        $env:VCPKGRS_DYNAMIC = "1"
+        $env:VCPKG_TARGET_TRIPLET = "$env:VCPKG_DEFAULT_TRIPLET"
+        $env:CMAKE_TOOLCHAIN_FILE = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+
     - name: 构建项目
       shell: powershell
       env:
-        VCPKGRS_DYNAMIC: "1"
         RUSTFLAGS: "-C target-feature=+crt-static"
       run: |
-        cargo build --release --features "vcpkg" -v
+        cargo build --${{ inputs.build_type }} --features "vcpkg" -v
 
     - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
         name: rustdesk-bin
         path: |
-          target/release/rustdesk.exe
-          target/release/*.dll
+          target/${{ inputs.build_type }}/rustdesk.exe
+          target/${{ inputs.build_type }}/*.dll
